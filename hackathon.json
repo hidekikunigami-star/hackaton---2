@@ -1,0 +1,8 @@
+{
+  "teamCode": "REEMPLAZAR_CON_TEAM_CODE",
+  "members": [
+    { "name": "Nombre del integrante 1", "code": "Código UTEC" },
+    { "name": "Nombre del integrante 2", "code": "Código UTEC" },
+    { "name": "Nombre del integrante 3", "code": "Código UTEC" }
+  ]
+}
