@@ -1,0 +1,170 @@
+/* ===== Utilidades comunes ===== */
+.boot-screen{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--muted);font-size:12px;text-align:center;padding:24px}
+.boot-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.field-error{color:#e5a391;font-size:10px;line-height:1.5}
+.text-link{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font:10px var(--mono);letter-spacing:1px}
+.inline-retry{background:none;border:0;padding:4px 0 0;color:#e5a391;font-size:10px;text-align:left;cursor:pointer;text-decoration:underline}
+.sidebar-backdrop{display:none}
+@media(max-width:900px){.sidebar-backdrop{display:block;position:fixed;inset:0;z-index:15;background:#0008;border:0}}
+
+/* Skeletons: misma altura que el contenido real para no mover el layout */
+.skeleton-block,.skeleton-card{position:relative;overflow:hidden;background:#1a221c;border:1px solid #273128;border-radius:8px}
+.skeleton-card{height:318px}
+.skeleton-block::after,.skeleton-card::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,#ffffff0d,transparent);transform:translateX(-100%);animation:skeleton 1.4s infinite}
+@keyframes skeleton{to{transform:translateX(100%)}}
+
+/* ===== Dashboard ===== */
+.fruit-breakdown{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.fruit-chip{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #2f3a30;border-radius:999px;background:#171f19;font-size:11px;color:#b9c1b5}
+.fruit-chip b{color:var(--accent);font-family:var(--mono)}
+.fruit-chip:hover{border-color:#6d7556}
+.top-bounties{list-style:none;margin:0;padding:0;border:1px solid #2b362d;border-radius:8px;overflow:hidden}
+.top-bounties li+li{border-top:1px solid #253027}
+.top-bounties a{display:grid;grid-template-columns:42px minmax(0,1fr) auto;align-items:center;gap:12px;padding:13px 16px;background:#171f19;transition:background .15s}
+.top-bounties a:hover{background:#1d271f}
+.top-rank{font:12px var(--mono);color:var(--accent)}
+.top-name{min-width:0}
+.top-name b{display:block;font:650 13px var(--display)}
+.top-name small{display:block;color:var(--muted);font-size:10px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.top-bounty{font:12px var(--mono);color:#e7dcc0}
+.dashboard-foot{display:flex;align-items:center;gap:6px;color:#6d7a6f;font-size:10px;margin-top:26px}
+
+/* ===== Se Busca ===== */
+.results-area{position:relative;min-height:680px}
+.wanted-grid.is-refreshing{opacity:.55;transition:opacity .2s;pointer-events:none}
+.refresh-indicator{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;background:#1f2a21;border:1px solid #3b473b;font-size:10px;color:#cfd6c8;z-index:2}
+.threat{letter-spacing:2px;color:#e0a15a;font-size:9px}
+.threat-off{color:#ffffff30}
+.wanted-epithet{min-height:14px}
+.wanted-card-info h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wanted-card-meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px}
+.bounty-history{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.bounty-history li{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:10px;align-items:center;font-size:10px;color:var(--muted)}
+.bounty-history b{font:11px var(--mono);color:#e7dcc0}
+.bounty-bar{height:6px;border-radius:99px;background:#232c24;overflow:hidden}
+.bounty-bar span{display:block;height:100%;background:var(--accent);border-radius:99px}
+.detail-row dd a{color:var(--accent);text-decoration:underline}
+@media(max-width:640px){.bounty-history li{grid-template-columns:1fr auto}.bounty-bar{display:none}.results-area{min-height:520px}}
+
+/* ===== News ===== */
+.news-article-body p{margin:0 0 14px}
+.related-wanted{font-size:11px;color:var(--muted)}
+.related-wanted a{color:var(--accent);text-decoration:underline}
+.error-box .secondary-btn{margin-left:auto;flex-shrink:0}
+.logpose-required .secondary-btn{display:inline-flex}
+
+/* ===== Sagas: listado ===== */
+.saga-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.saga-tile{display:flex;flex-direction:column;gap:8px;padding:22px;border-radius:12px;background:var(--saga-bg,#19241c);color:var(--saga-text,#e7e9df);border:1px solid color-mix(in srgb,var(--saga-primary,#d7b36c) 35%,transparent);transition:transform .2s,border-color .2s}
+.saga-tile:hover{transform:translateY(-3px);border-color:var(--saga-primary,#d7b36c)}
+.saga-tile-order{font:10px var(--mono);letter-spacing:1.5px;color:var(--saga-primary,#d7b36c)}
+.saga-tile h2{font:750 24px/1.15 var(--display);letter-spacing:-.6px;margin:2px 0}
+.saga-tile-subtitle{margin:0;font-size:12px;opacity:.85}
+.saga-tile-synopsis{margin:4px 0 0;font-size:12px;line-height:1.7;opacity:.75;flex:1}
+.saga-tile-meta{display:flex;flex-wrap:wrap;gap:6px 14px;font:10px var(--mono);opacity:.8}
+.saga-tile-meta span{display:inline-flex;align-items:center;gap:5px}
+.saga-tile-cta{display:inline-flex;align-items:center;gap:6px;margin-top:6px;font:10px var(--mono);letter-spacing:1px;color:var(--saga-accent,#d7b36c)}
+
+/* View Transitions: el título de la saga "viaja" del listado a la historia */
+.vt-title{view-transition-name:var(--vt-name,none)}
+::view-transition-old(root),::view-transition-new(root){animation-duration:.35s}
+
+/* ===== Sagas: historia (scrollytelling) ===== */
+.sg-page{min-height:calc(100vh - 65px)}
+.sg-root{
+  --sg-bg:#111713;--sg-surface:#19241c;--sg-primary:#d7b36c;--sg-accent:#d7b36c;--sg-text:#e7e9df;
+  background:var(--sg-bg);color:var(--sg-text);min-height:100vh;
+  transition:background-color .6s ease,color .6s ease;
+}
+.sg-progress{position:sticky;top:0;z-index:12;height:4px;background:color-mix(in srgb,var(--sg-text) 12%,transparent)}
+.sg-progress-fill{height:100%;background:var(--sg-primary);transform-origin:0 50%;transform:scaleX(var(--scroll-progress,0));transition:background-color .6s}
+/* Scroll-driven Animations cuando el navegador las soporta: la barra avanza con el scroll, sin JS */
+@supports (animation-timeline: scroll()){
+  .sg-progress-fill{transform:none;animation:sg-progress linear both;animation-timeline:scroll(root block)}
+  @keyframes sg-progress{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+}
+
+.sg-header{max-width:900px;margin:0 auto;padding:40px 38px 30px}
+.sg-back{display:inline-flex;align-items:center;gap:8px;background:none;border:1px solid color-mix(in srgb,var(--sg-text) 25%,transparent);color:inherit;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer}
+.sg-kicker{display:block;margin-top:26px;font:10px var(--mono);letter-spacing:1.5px;color:var(--sg-primary)}
+.sg-title{font:780 clamp(32px,5vw,58px)/1.05 var(--display);letter-spacing:-1.8px;margin:12px 0 8px}
+.sg-subtitle{font-size:15px;opacity:.85;margin:0 0 16px}
+.sg-intro{font-size:15px;line-height:1.8;opacity:.8;margin:0 0 18px}
+.sg-hint{font-size:11px;opacity:.6;margin:0}
+.sg-hint kbd{font:10px var(--mono);padding:1px 5px;border:1px solid color-mix(in srgb,var(--sg-text) 30%,transparent);border-radius:4px}
+
+.sg-body{display:grid;grid-template-columns:minmax(320px,1fr) minmax(0,1.05fr);gap:40px;max-width:1360px;margin:0 auto;padding:0 38px}
+.sg-panel{position:sticky;top:24px;align-self:start;display:flex;flex-direction:column;gap:14px;padding:16px;border-radius:12px;background:var(--sg-surface);border:1px solid color-mix(in srgb,var(--sg-text) 14%,transparent);transition:background-color .6s}
+.sg-map{width:100%;height:auto;display:block;border-radius:8px;overflow:hidden}
+.sg-map-sea{fill:color-mix(in srgb,var(--sg-bg) 75%,#0b2a3a)}
+.sg-map-grid{stroke:color-mix(in srgb,var(--sg-text) 10%,transparent);stroke-width:1}
+.sg-route-base{fill:none;stroke:color-mix(in srgb,var(--sg-text) 30%,transparent);stroke-dasharray:6 8;stroke-linecap:round;stroke-linejoin:round}
+.sg-route-traveled{fill:none;stroke:var(--sg-primary);stroke-linecap:round;stroke-linejoin:round;transition:stroke-dashoffset .7s ease,stroke .6s}
+.sg-island circle{fill:color-mix(in srgb,var(--sg-text) 45%,transparent);transition:r .4s,fill .4s}
+.sg-island text{fill:color-mix(in srgb,var(--sg-text) 70%,transparent);font-family:var(--mono)}
+.sg-island.is-visited circle{fill:var(--sg-primary)}
+.sg-island.is-active circle{fill:var(--sg-accent);stroke:var(--sg-text);stroke-width:2}
+.sg-island.is-active text{fill:var(--sg-text);font-weight:700}
+.sg-ship{color:var(--sg-text);transition:transform .7s ease}
+.sg-panel-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sg-step{font:11px var(--mono);opacity:.85}
+.sg-step b{color:var(--sg-primary)}
+.sg-step-buttons{display:flex;gap:6px}
+.sg-step-buttons button{width:32px;height:32px;display:grid;place-items:center;border-radius:6px;background:none;border:1px solid color-mix(in srgb,var(--sg-text) 25%,transparent);color:inherit;cursor:pointer}
+.sg-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
+.sg-metric{padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--sg-bg) 55%,transparent)}
+.sg-metric dt{font:9px var(--mono);letter-spacing:1px;text-transform:uppercase;opacity:.7}
+.sg-metric dd{margin:4px 0 0;font:700 18px var(--display);color:var(--sg-primary)}
+.sg-metric small{font:10px var(--mono);opacity:.75;color:var(--sg-text)}
+.sg-stage-nav{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:200px;overflow:auto}
+.sg-stage-nav button{width:100%;display:flex;gap:10px;align-items:center;text-align:left;background:none;border:0;color:inherit;opacity:.65;padding:6px 8px;border-radius:6px;font-size:11px;cursor:pointer}
+.sg-stage-nav button span{font:10px var(--mono);color:var(--sg-primary)}
+.sg-stage-nav button.is-visited{opacity:.8}
+.sg-stage-nav button[aria-current=step]{opacity:1;background:color-mix(in srgb,var(--sg-primary) 18%,transparent);font-weight:700}
+
+.sg-stages{list-style:none;margin:0;padding:0 0 45vh}
+.sg-stage{min-height:62vh;padding:28px 0;scroll-margin-top:22vh;outline:none;border-radius:10px}
+.sg-stage:focus-visible{outline:2px solid var(--sg-primary);outline-offset:6px}
+.sg-stage-inner{padding:24px 26px;border-radius:12px;border:1px solid transparent;transition:border-color .4s,background-color .4s,opacity .5s,transform .5s}
+.sg-stage.is-active .sg-stage-inner{background:color-mix(in srgb,var(--sg-surface) 85%,transparent);border-color:color-mix(in srgb,var(--stage-primary) 45%,transparent)}
+.sg-stage-order{font:10px var(--mono);letter-spacing:1.5px;color:var(--stage-accent,var(--sg-primary))}
+.sg-stage h2{font:750 clamp(24px,3vw,34px)/1.15 var(--display);letter-spacing:-.8px;margin:10px 0 14px}
+.sg-stage p{font-size:15px;line-height:1.85;margin:0 0 14px;opacity:.9}
+
+/* Aparición de cada etapa: Scroll-driven (view timeline) si existe; si no, clase .is-revealed desde JS */
+@media (prefers-reduced-motion: no-preference){
+  .sg-stage:not(.is-revealed) .sg-stage-inner{opacity:0;transform:translateY(24px)}
+  @supports (animation-timeline: view()){
+    .sg-stage .sg-stage-inner,.sg-stage:not(.is-revealed) .sg-stage-inner{opacity:1;transform:none;animation:sg-reveal linear both;animation-timeline:view();animation-range:entry 0% cover 25%}
+    @keyframes sg-reveal{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
+  }
+}
+
+.sg-end{max-width:700px;margin:0 auto;padding:60px 38px 90px;text-align:center}
+.sg-end svg{color:var(--sg-primary)}
+.sg-end h2{font:750 28px var(--display);margin:12px 0 8px}
+.sg-end p{opacity:.8;font-size:13px;margin:0 0 20px}
+
+/* Mobile: mismo comportamiento; el mapa y las métricas quedan fijos arriba (compactos) */
+@media(max-width:900px){
+  .sg-header{padding:24px 16px 20px}
+  .sg-body{grid-template-columns:1fr;gap:0;padding:0 12px}
+  .sg-panel{top:4px;z-index:5;gap:8px;padding:10px}
+  .sg-map{max-height:22vh}
+  .sg-metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+  .sg-metric{padding:6px}
+  .sg-metric dt{font-size:7px;letter-spacing:.3px}
+  .sg-metric dd{font-size:12px}
+  .sg-stage-nav{display:none}
+  .sg-stage{min-height:55vh;scroll-margin-top:46vh}
+  .sg-stage-inner{padding:18px 14px}
+  .sg-stage p{font-size:14px}
+}
+
+/* Reduced motion: sin animaciones ni transiciones, toda la historia visible y legible */
+@media (prefers-reduced-motion: reduce){
+  .sg-root,.sg-progress-fill,.sg-route-traveled,.sg-ship,.sg-island circle,.sg-stage-inner,.saga-tile,.wanted-card{transition:none!important;animation:none!important}
+  .sg-stage .sg-stage-inner{opacity:1!important;transform:none!important}
+  .sg-progress-fill{transform:scaleX(var(--scroll-progress,0))}
+  ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
+}
