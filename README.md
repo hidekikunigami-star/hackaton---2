@@ -7,9 +7,9 @@ Toda la data viene de la API del curso; no incluye backend, seeds ni credenciale
 
 | Nombre | Código |
 |:-------|:-------|
-| _Completar_ | _Completar_ |
-| _Completar_ | _Completar_ |
-| _Completar_ | _Completar_ |
+| Joseph Geraldo Soto | 202510412 |
+| Hideki Aldo Kunigami Chia | 202510390 |
+| Martin Talavera Pinto | 202510730 |
 
 ## Cómo ejecutar
 
