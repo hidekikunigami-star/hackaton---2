@@ -1,0 +1,3141 @@
+From 7d06c9db616ea784fffda424cf15bba57b685718 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 19:22:19 -0500
+Subject: [PATCH] Implementa CP1, CP2, CP4 y CP5 de la consola Log Pose
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Reestructura el proyecto en src/ (el build fallaba: index.html y tsconfig apuntan a src)
+- Tipos del contrato real de la API (enums de Swagger) sin any
+- CP1: sesión con estado checking, rutas privadas con retorno exacto, errores por campo
+- CP2: estado completo en la URL, validación, debounce, AbortController, detalle y volver
+- CP4: infinite scroll por cursor sin duplicados, filtros en URL, verificación de rumores
+- CP5: scrollytelling con mapa persistente, scroll-driven animations, view transitions,
+  etapa en la URL, teclado y prefers-reduced-motion
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DwKufvgigQsJ1JyCvdr8M7
+---
+ .gitignore                        |   7 +
+ App.tsx                           | 258 ---------------------------
+ README.md                         |  88 ++++++---
+ api.ts                            |  48 -----
+ main.tsx                          |   7 -
+ src/App.tsx                       |  63 +++++++
+ src/api/client.ts                 | 100 +++++++++++
+ src/api/types.ts                  | 177 ++++++++++++++++++
+ src/auth/AuthContext.tsx          |  94 ++++++++++
+ src/auth/guards.tsx               |  52 ++++++
+ src/components/Layout.tsx         |  65 +++++++
+ src/components/ui.tsx             |  76 ++++++++
+ src/extra.css                     | 170 ++++++++++++++++++
+ src/lib/format.ts                 |  68 +++++++
+ src/lib/useResource.ts            |  33 ++++
+ src/lib/viewTransition.ts         |  16 ++
+ src/main.tsx                      |  20 +++
+ src/pages/AuthPage.tsx            | 145 +++++++++++++++
+ src/pages/Dashboard.tsx           | 154 ++++++++++++++++
+ src/pages/news/NewsDetailPage.tsx | 125 +++++++++++++
+ src/pages/news/NewsFeedPage.tsx   | 267 +++++++++++++++++++++++++++
+ src/pages/news/newsStore.ts       |  49 +++++
+ src/pages/sagas/SagaStory.tsx     | 287 ++++++++++++++++++++++++++++++
+ src/pages/sagas/SagasPage.tsx     |  65 +++++++
+ src/pages/sagas/sagaCache.ts      |  17 ++
+ src/pages/wanted/WantedDetail.tsx |  86 +++++++++
+ src/pages/wanted/WantedList.tsx   | 245 +++++++++++++++++++++++++
+ src/pages/wanted/wantedQuery.ts   |  70 ++++++++
+ styles.css => src/styles.css      |   0
+ src/vite-env.d.ts                 |   9 +
+ 30 files changed, 2521 insertions(+), 340 deletions(-)
+ create mode 100644 .gitignore
+ delete mode 100644 App.tsx
+ delete mode 100644 api.ts
+ delete mode 100644 main.tsx
+ create mode 100644 src/App.tsx
+ create mode 100644 src/api/client.ts
+ create mode 100644 src/api/types.ts
+ create mode 100644 src/auth/AuthContext.tsx
+ create mode 100644 src/auth/guards.tsx
+ create mode 100644 src/components/Layout.tsx
+ create mode 100644 src/components/ui.tsx
+ create mode 100644 src/extra.css
+ create mode 100644 src/lib/format.ts
+ create mode 100644 src/lib/useResource.ts
+ create mode 100644 src/lib/viewTransition.ts
+ create mode 100644 src/main.tsx
+ create mode 100644 src/pages/AuthPage.tsx
+ create mode 100644 src/pages/Dashboard.tsx
+ create mode 100644 src/pages/news/NewsDetailPage.tsx
+ create mode 100644 src/pages/news/NewsFeedPage.tsx
+ create mode 100644 src/pages/news/newsStore.ts
+ create mode 100644 src/pages/sagas/SagaStory.tsx
+ create mode 100644 src/pages/sagas/SagasPage.tsx
+ create mode 100644 src/pages/sagas/sagaCache.ts
+ create mode 100644 src/pages/wanted/WantedDetail.tsx
+ create mode 100644 src/pages/wanted/WantedList.tsx
+ create mode 100644 src/pages/wanted/wantedQuery.ts
+ rename styles.css => src/styles.css (100%)
+ create mode 100644 src/vite-env.d.ts
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..2ec8a2f
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,7 @@
++node_modules
++dist
++.env
++.env.local
++.env.*.local
++*.log
++.DS_Store
+diff --git a/App.tsx b/App.tsx
+deleted file mode 100644
+index a9d9d6f..0000000
+--- a/App.tsx
++++ /dev/null
+@@ -1,258 +0,0 @@
+-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type CSSProperties } from 'react'
+-import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+-import { Anchor, ArrowDown, ArrowLeft, ArrowRight, Bell, BookOpen, Check, ChevronDown, Compass, Filter, Flame, Globe2, LogOut, Menu, Newspaper, Search, Shield, Ship, Skull, Sparkles, Target, X } from 'lucide-react'
+-import { ApiError, asArray, asRecord, clearSession, getToken, num, prettyError, queryString, request, saveSession, str } from './api'
+-
+-type CrewUser = { teamName?: string; teamCode?: string; email?: string }
+-type Summary = Record<string, unknown>
+-type WantedItem = Record<string, unknown> & { id?: string | number }
+-type NewsItem = Record<string, unknown> & { id?: string | number }
+-type SagaItem = Record<string, unknown> & { id?: string | number }
+-
+-function readMessage(data: unknown): string {
+-  const record = asRecord(data)
+-  const detail = record.detail ?? record.message ?? record.error
+-  if (typeof detail === 'string') return detail
+-  const errors = asArray(record.errors)
+-  if (errors.length) return errors.map((item) => { const row = asRecord(item); return `${str(row.field, 'Dato')}: ${str(row.message, 'inválido')}` }).join(' · ')
+-  return 'Revisa los datos e inténtalo de nuevo.'
+-}
+-function idOf(item: Record<string, unknown>): string { return str(item.id ?? item.newsId ?? item.sagaId ?? item.wantedId) }
+-function labelOf(item: Record<string, unknown>, ...keys: string[]): string { for (const key of keys) if (item[key] !== undefined && item[key] !== null) return str(item[key]); return 'Sin título' }
+-function money(value: unknown): string { const n = num(value, Number.NaN); return Number.isFinite(n) ? `${n.toLocaleString('es-PE')} ฿` : '—' }
+-
+-function App() {
+-  const [token, setToken] = useState<string | null>(getToken())
+-  const [user, setUser] = useState<CrewUser | null>(null)
+-  const [checking, setChecking] = useState(Boolean(getToken()))
+-  const [mobileNav, setMobileNav] = useState(false)
+-  const location = useLocation()
+-  const navigate = useNavigate()
+-
+-  const logout = useCallback(() => { clearSession(); setToken(null); setUser(null); navigate('/login', { replace: true }) }, [navigate])
+-  useEffect(() => {
+-    const onUnauthorized = () => { setToken(null); setUser(null); setChecking(false); navigate('/login', { replace: true, state: { from: location } }) }
+-    window.addEventListener('logpose:unauthorized', onUnauthorized)
+-    return () => window.removeEventListener('logpose:unauthorized', onUnauthorized)
+-  }, [location, navigate])
+-  useEffect(() => {
+-    if (!token) { setChecking(false); return }
+-    let alive = true
+-    setChecking(true)
+-    request<unknown>('/auth/me').then((data) => {
+-      if (!alive) return
+-      const r = asRecord(data)
+-      const crew = asRecord(r.team ?? r.crew ?? r.user ?? data)
+-      setUser({ teamName: str(crew.teamName ?? crew.name ?? crew.team_name), teamCode: str(crew.teamCode ?? crew.code ?? crew.team_code), email: str(crew.email) })
+-    }).catch(() => { if (alive) { clearSession(); setToken(null); setUser(null) } }).finally(() => { if (alive) setChecking(false) })
+-    return () => { alive = false }
+-  }, [token])
+-
+-  if (checking) return <div className="boot-screen"><div className="brand-mark"><Compass size={30}/></div><p>Consultando el Log Pose…</p><div className="loading-line"/></div>
+-  return <div className="app-shell">
+-    {token && <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
+-      <Link to="/" className="brand" onClick={() => setMobileNav(false)}><span className="brand-mark"><Compass size={25}/></span><span><strong>LOG POSE</strong><small>BOUNTY GUILD</small></span></Link>
+-      <div className="crew-chip"><span className="crew-avatar"><Skull size={20}/></span><span><b>{user?.teamName || 'Tripulación'}</b><small>{user?.teamCode || 'EAST BLUE'}</small></span><span className="online-dot"/></div>
+-      <p className="nav-label">TU RUTA</p>
+-      <nav className="main-nav">
+-        <NavLink to="/" end onClick={() => setMobileNav(false)}><Compass size={18}/> Puente de mando</NavLink>
+-        <NavLink to="/wanted" onClick={() => setMobileNav(false)}><Target size={18}/> Se busca <span className="nav-count">02</span></NavLink>
+-        <NavLink to="/news" onClick={() => setMobileNav(false)}><Newspaper size={18}/> News Coo <span className="lock-mini">{''}</span></NavLink>
+-        <NavLink to="/sagas" onClick={() => setMobileNav(false)}><BookOpen size={18}/> Poneglyph</NavLink>
+-      </nav>
+-      <div className="sidebar-bottom"><div className="logpose-card"><div className="logpose-icon"><Anchor size={22}/></div><div><b>Log Pose</b><small>Estado de navegación</small></div><span className="status-light"/></div><p className="sidebar-quote">“El mar no perdona a quien navega sin rumbo.”</p><button className="logout-btn" onClick={logout}><LogOut size={16}/> Cerrar sesión</button></div>
+-    </aside>}
+-    <main className={`main-area ${!token ? 'main-auth' : ''}`}>
+-      {token && <header className="topbar"><button className="mobile-menu icon-button" onClick={() => setMobileNav(!mobileNav)} aria-label="Abrir menú"><Menu size={20}/></button><div className="breadcrumb"><span>GRAND LINE</span><span className="crumb-slash">/</span><b>{routeLabel(location.pathname)}</b></div><div className="top-actions"><span className="server-status"><span className="online-dot"/> API CONECTADA</span><button className="icon-button notification-button" aria-label="Notificaciones"><Bell size={18}/></button><div className="top-avatar">{(user?.teamName || 'P').slice(0,1).toUpperCase()}</div></div></header>}
+-      <Routes>
+-        <Route path="/login" element={token ? <Navigate to="/" replace/> : <AuthPage mode="login" onAuth={(t, u) => { saveSession(t); setToken(t); setUser(u); const from = asRecord(asRecord(location.state).from); const destination = `${str(from.pathname, '/')}${str(from.search)}${str(from.hash)}`; navigate(destination, { replace: true }) }}/>} />
+-        <Route path="/register" element={token ? <Navigate to="/" replace/> : <AuthPage mode="register" onAuth={(t, u) => { saveSession(t); setToken(t); setUser(u); const from = asRecord(asRecord(location.state).from); const destination = `${str(from.pathname, '/')}${str(from.search)}${str(from.hash)}`; navigate(destination, { replace: true }) }}/>} />
+-        <Route path="/" element={<Protected token={token}><Dashboard user={user}/></Protected>}/>
+-        <Route path="/wanted" element={<Protected token={token}><WantedPage/></Protected>}/>
+-        <Route path="/wanted/:id" element={<Protected token={token}><WantedDetail/></Protected>}/>
+-        <Route path="/news" element={<Protected token={token}><NewsPage/></Protected>}/>
+-        <Route path="/news/:id" element={<Protected token={token}><NewsDetail/></Protected>}/>
+-        <Route path="/sagas" element={<Protected token={token}><SagasPage/></Protected>}/>
+-        <Route path="/sagas/:id" element={<Protected token={token}><SagaStory/></Protected>}/>
+-        <Route path="*" element={<NotFound/>}/>
+-      </Routes>
+-    </main>
+-  </div>
+-}
+-function routeLabel(path: string): string { if (path.startsWith('/wanted')) return 'SE BUSCA'; if (path.startsWith('/news')) return 'NEWS COO'; if (path.startsWith('/sagas')) return 'PONEGLYPH'; if (path === '/login' || path === '/register') return 'EAST BLUE'; return 'PUENTE DE MANDO' }
+-function Protected({ token, children }: { token: string | null; children: ReactNode }) { const location = useLocation(); return token ? <>{children}</> : <Navigate to="/login" replace state={{ from: location }}/> }
+-
+-function AuthPage({ mode, onAuth }: { mode: 'login' | 'register'; onAuth: (token: string, user: CrewUser) => void }) {
+-  const [teamName, setTeamName] = useState(''); const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [error, setError] = useState(''); const [fieldError, setFieldError] = useState(''); const [busy, setBusy] = useState(false)
+-  const isRegister = mode === 'register'
+-  async function submit(event: FormEvent<HTMLFormElement>) {
+-    event.preventDefault(); setError(''); setFieldError(''); setBusy(true)
+-    try {
+-      const data = await request<unknown>(isRegister ? '/auth/register' : '/auth/login', { method: 'POST', body: JSON.stringify(isRegister ? { teamName: teamName.trim(), email: email.trim(), password } : { email: email.trim(), password }) })
+-      const record = asRecord(data); const nested = asRecord(record.data); const source = Object.keys(nested).length ? nested : record
+-      const token = str(source.accessToken ?? source.access_token ?? source.token ?? asRecord(source.session).accessToken)
+-      if (!token) throw new Error('La API respondió sin un token de sesión. Revisa el contrato del endpoint.')
+-      const crew = asRecord(source.team ?? source.crew ?? source.user)
+-      onAuth(token, { teamName: str(crew.teamName ?? crew.name ?? teamName), teamCode: str(crew.teamCode ?? crew.code), email })
+-    } catch (err) {
+-      if (err instanceof ApiError) { const data = asRecord(err.data); const field = str(data.field ?? asRecord(data.error).field); if (field) setFieldError(field); setError(readMessage(err.data)) } else setError(prettyError(err))
+-    } finally { setBusy(false) }
+-  }
+-  return <div className="auth-layout"><div className="auth-art"><div className="auth-art-grid"/><div className="auth-topline"><span><Compass size={18}/> LOG POSE CONSOLE</span><span>EST. GRAND LINE</span></div><div className="auth-illustration"><div className="sun-disc"/><div className="sea-ring ring-one"/><div className="sea-ring ring-two"/><div className="auth-compass"><Compass size={116} strokeWidth={0.8}/></div><div className="island island-one"/><div className="island island-two"/><div className="ship-silhouette"><Ship size={100} strokeWidth={1}/></div></div><div className="auth-hero-copy"><p className="eyebrow">LA AVENTURA COMIENZA AQUÍ</p><h1>Tu rumbo.<br/><em>Tu leyenda.</em></h1><p>El Grand Line no espera a nadie. Registra tu tripulación y reclama tu lugar en el mapa.</p></div><div className="auth-foot"><span>01° 52' N — 131° 40' E</span><span>NO MAP. NO MERCY.</span></div></div><div className="auth-panel"><div className="auth-mobile-brand"><Compass/> LOG POSE</div><div className="auth-form-wrap"><div className="section-kicker"><span className="kicker-line"/>{isRegister ? 'NUEVA TRIPULACIÓN' : 'IDENTIFICACIÓN DE TRIPULACIÓN'}</div><h2>{isRegister ? 'Zarpa con nosotros.' : 'Qué bueno verte,'}<br/><span>{isRegister ? 'Crea tu leyenda.' : 'capitán.'}</span></h2><p className="auth-intro">{isRegister ? 'Registra tu crew para desbloquear tu consola de navegación.' : 'Ingresa las credenciales de tu tripulación para continuar el viaje.'}</p><form onSubmit={submit} className="auth-form">
+-    {isRegister && <label>Nombre de la tripulación<input value={teamName} onChange={e => setTeamName(e.target.value)} placeholder="Ej. Sombreros del Alba" required minLength={2} autoComplete="organization" aria-invalid={fieldError.toLowerCase().includes('team') || fieldError.toLowerCase().includes('name')}/></label>}
+-    <label>Correo de navegación<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="capitan@grandline.com" required autoComplete="email" aria-invalid={fieldError.toLowerCase().includes('email')}/></label>
+-    <label>Contraseña<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mínimo 8 caracteres" required minLength={isRegister ? 8 : 1} autoComplete={isRegister ? 'new-password' : 'current-password'} aria-invalid={fieldError.toLowerCase().includes('password')}/></label>
+-    {error && <div className="error-box"><X size={16}/><span>{error}</span></div>}
+-    <button className="primary-btn auth-submit" type="submit" disabled={busy}>{busy ? <><span className="spinner"/> Verificando coordenadas…</> : <>{isRegister ? 'Registrar tripulación' : 'Entrar al Grand Line'} <ArrowRight size={17}/></>}</button>
+-  </form><p className="auth-switch">{isRegister ? '¿Ya tienes una tripulación?' : '¿Aún no tienes tripulación?'} <Link to={isRegister ? '/login' : '/register'}>{isRegister ? 'Inicia sesión' : 'Registra tu crew'}</Link></p><div className="auth-note"><Shield size={16}/><span>Conexión segura con el servidor de la Guild</span></div></div><div className="auth-panel-footer"><span>LOG POSE CONSOLE v1.0</span><span>© BOUNTY GUILD</span></div></div></div>
+-}
+-
+-function PageHeading({ eyebrow, title, highlight, description, action }: { eyebrow: string; title: string; highlight?: string; description: string; action?: ReactNode }) { return <div className="page-heading"><div><div className="section-kicker"><span className="kicker-line"/>{eyebrow}</div><h1>{title} {highlight && <em>{highlight}</em>}</h1><p>{description}</p></div>{action && <div className="heading-action">{action}</div>}</div> }
+-function ErrorState({ message, retry }: { message: string; retry: () => void }) { return <div className="state-panel error-state"><div className="state-icon"><X size={22}/></div><h3>Perdimos la señal</h3><p>{message}</p><button className="secondary-btn" onClick={retry}>Reintentar <ArrowRight size={15}/></button></div> }
+-function LoadingState({ text = 'Consultando el registro de la Guild…' }: { text?: string }) { return <div className="loading-state"><span className="spinner dark-spinner"/><span>{text}</span></div> }
+-function EmptyState({ title, detail }: { title: string; detail: string }) { return <div className="state-panel"><div className="state-icon"><Search size={22}/></div><h3>{title}</h3><p>{detail}</p></div> }
+-
+-function Dashboard({ user }: { user: CrewUser | null }) {
+-  const [summary, setSummary] = useState<Summary | null>(null); const [pose, setPose] = useState<Record<string, unknown> | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState('')
+-  const load = useCallback(async () => { setLoading(true); setError(''); try { const [s, p] = await Promise.all([request<unknown>('/dashboard/summary'), request<unknown>('/log-pose')]); setSummary(asRecord(s)); setPose(asRecord(p)) } catch (e) { setError(prettyError(e)) } finally { setLoading(false) } }, [])
+-  useEffect(() => { void load() }, [load])
+-  const summarySource = asRecord(summary?.summary ?? summary?.stats ?? summary)
+-  const poseSource = asRecord(pose?.logPose ?? pose?.log_pose ?? pose)
+-  const poseUnlocked = Boolean(poseSource.unlocked ?? poseSource.isUnlocked ?? poseSource.hasLogPose ?? poseSource.approved)
+-  const stats = [
+-    { label: 'RECOMPENSA TOTAL', value: money(summarySource.totalBounty ?? summarySource.total_bounty ?? summarySource.totalReward), note: 'Berries acumulados', icon: Flame },
+-    { label: 'CARTELes ACTIVOS', value: str(summarySource.activeWanted ?? summarySource.wantedCount ?? summarySource.activeBounties ?? summarySource.totalWanted, '—'), note: 'Objetivos registrados', icon: Target },
+-    { label: 'NOTICIAS REVISADAS', value: str(summarySource.verifiedNews ?? summarySource.reviewedNews ?? summarySource.confirmedNews, '—'), note: 'Reportes verificados', icon: Newspaper },
+-  ]
+-  return <div className="page-content dashboard-page"><PageHeading eyebrow="EAST BLUE · PUESTO DE MANDO" title="A la orden," highlight="capitán." description={`El mar está inquieto. ${user?.teamName ? `${user.teamName}, tu` : 'Tu'} próxima aventura comienza aquí.`} action={<span className="date-pill"><span className="online-dot"/> SISTEMA OPERATIVO</span>}/>
+-    {error && <ErrorState message={error} retry={() => void load()}/>}
+-    {!error && loading ? <LoadingState/> : !error && <>
+-      <section className="welcome-banner"><div className="welcome-copy"><span className="banner-tag"><Sparkles size={13}/> REPORTE DE LA TRIPULACIÓN</span><h2>El mundo es demasiado grande<br/>para quedarse en puerto.</h2><p>Revisa los carteles, sigue las noticias y encuentra la historia que cambiará tu rumbo.</p><Link to="/wanted" className="banner-link">Explorar recompensas <ArrowRight size={16}/></Link></div><div className="banner-art"><div className="banner-sun"/><div className="banner-wave wave-a"/><div className="banner-wave wave-b"/><div className="banner-compass"><Compass size={140} strokeWidth={0.7}/></div><span className="coordinate">GRAND LINE / 01</span></div></section>
+-      <div className="section-title-row"><div><div className="section-kicker"><span className="kicker-line"/> DATOS DE LA GUILD</div><h2>Estado de la tripulación</h2></div><span className="updated-label">DATOS EN VIVO</span></div>
+-      <div className="stats-grid">{stats.map((stat, index) => { const Icon = stat.icon; return <article className="stat-card" key={stat.label}><div className="stat-card-top"><span>{stat.label}</span><span className={`stat-icon stat-icon-${index}`}><Icon size={18}/></span></div><div className="stat-value">{stat.value}</div><div className="stat-note"><span className="stat-dot"/>{stat.note}</div></article> })}</div>
+-      <div className="section-title-row lower-title"><div><div className="section-kicker"><span className="kicker-line"/> PRÓXIMOS DESTINOS</div><h2>Tu ruta de navegación</h2></div></div>
+-      <div className="destination-grid"><Link to="/wanted" className="destination-card wanted-destination"><div className="destination-icon"><Target size={21}/></div><div><span className="destination-number">01 / EAST BLUE</span><h3>Carteles de Se Busca</h3><p>Rastrea objetivos, filtra recompensas y descubre sus historias.</p></div><ArrowRight className="destination-arrow" size={18}/></Link><Link to="/news" className={`destination-card ${poseUnlocked ? 'news-destination' : 'locked-destination'}`}><div className="destination-icon"><Newspaper size={21}/></div><div><span className="destination-number">02 / GRAND LINE {poseUnlocked ? '· DESBLOQUEADO' : '· BLOQUEADO'}</span><h3>News Coo</h3><p>{poseUnlocked ? 'Sigue los reportes del mundo y verifica los rumores.' : 'Necesitas aprobar la inspección de Reverse Mountain.'}</p></div><ArrowRight className="destination-arrow" size={18}/></Link><Link to="/sagas" className={`destination-card ${poseUnlocked ? 'saga-destination' : 'locked-destination'}`}><div className="destination-icon"><BookOpen size={21}/></div><div><span className="destination-number">03 / PONEGLYPH {poseUnlocked ? '· DESBLOQUEADO' : '· BLOQUEADO'}</span><h3>La Gran Saga</h3><p>Recorre islas y descubre la narrativa oculta en los Poneglyphs.</p></div><ArrowRight className="destination-arrow" size={18}/></Link></div>
+-      <div className="pose-status-panel"><div className="pose-emblem"><Compass size={27}/></div><div className="pose-status-copy"><span className="destination-number">REVERSE MOUNTAIN · CP3</span><h3>{poseUnlocked ? 'Log Pose sincronizado' : 'Tu Log Pose espera aprobación'}</h3><p>{str(poseSource.message ?? poseSource.description, poseUnlocked ? 'La ruta al Grand Line está abierta para tu tripulación.' : 'Solicita la inspección al equipo docente para desbloquear los endpoints del Grand Line.')}</p></div><span className={`pose-badge ${poseUnlocked ? 'unlocked' : ''}`}><span/> {poseUnlocked ? 'SINCRONIZADO' : 'PENDIENTE'}</span></div>
+-    </>}
+-  </div>
+-}
+-
+-function WantedPage() {
+-  const [searchParams, setSearchParams] = useSearchParams()
+-  const allowedSizes = ['10', '20', '50']
+-  const page = Math.max(0, Number.parseInt(searchParams.get('page') ?? '0', 10) || 0)
+-  const size = allowedSizes.includes(searchParams.get('size') ?? '') ? Number(searchParams.get('size')) : 10
+-  const status = searchParams.get('status') ?? ''; const crewId = searchParams.get('crewId') ?? ''; const fruit = searchParams.get('fruit') ?? ''; const sort = ['bounty,desc', 'name,asc', 'updatedAt,desc'].includes(searchParams.get('sort') ?? '') ? searchParams.get('sort')! : 'bounty,desc'
+-  const [searchInput, setSearchInput] = useState(searchParams.get('q') ?? '')
+-  const [items, setItems] = useState<WantedItem[]>([]); const [meta, setMeta] = useState({ totalElements: 0, totalPages: 0, page: 0 }); const [crews, setCrews] = useState<Record<string, unknown>[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState('')
+-  const latestRequest = useRef(0)
+-  useEffect(() => { setSearchInput(searchParams.get('q') ?? '') }, [searchParams])
+-  useEffect(() => { let alive = true; request<unknown>('/crews').then(data => { const r = asRecord(data); setCrews(asArray(r.content ?? r.items ?? data).map(asRecord)) }).catch(() => { if (alive) setCrews([]) }); return () => { alive = false } }, [])
+-  const filterKey = `${page}|${size}|${status}|${crewId}|${fruit}|${sort}|${searchParams.get('q') ?? ''}`
+-  useEffect(() => {
+-    const controller = new AbortController(); const requestId = ++latestRequest.current
+-    const params = queryString({ page, size, status: status || undefined, crewId: crewId || undefined, fruit: fruit || undefined, q: searchParams.get('q') || undefined, sort })
+-    setLoading(true); setError('')
+-    request<unknown>(`/wanted${params}`, {}, controller.signal).then(data => {
+-      if (requestId !== latestRequest.current) return
+-      const r = asRecord(data); const content = asArray(r.content ?? r.items ?? r.results).map(asRecord) as WantedItem[]
+-      const totalPages = Math.max(0, num(r.totalPages ?? r.total_pages, 0)); const totalElements = Math.max(0, num(r.totalElements ?? r.total_elements, content.length)); const actualPage = Math.max(0, num(r.page, page))
+-      setItems(content); setMeta({ totalElements, totalPages, page: actualPage })
+-      if (totalPages > 0 && page >= totalPages) update({ page: String(totalPages - 1) })
+-    }).catch(err => { if (controller.signal.aborted || requestId !== latestRequest.current) return; setError(prettyError(err)); setItems([]) }).finally(() => { if (requestId === latestRequest.current) setLoading(false) })
+-    return () => controller.abort()
+-  // filterKey contains every query dimension by design.
+-  // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [filterKey])
+-  function update(changes: Record<string, string>, resetPage = true) { const next = new URLSearchParams(searchParams); Object.entries(changes).forEach(([key, value]) => value ? next.set(key, value) : next.delete(key)); if (resetPage && !('page' in changes)) next.delete('page'); setSearchParams(next) }
+-  useEffect(() => { const timer = window.setTimeout(() => { const current = searchParams.get('q') ?? ''; if (searchInput.trim() !== current) update({ q: searchInput.trim() }) }, 350); return () => window.clearTimeout(timer) }, [searchInput])
+-  return <div className="page-content"><PageHeading eyebrow="EAST BLUE · ARCHIVO DE RECOMPENSAS" title="Se busca," highlight="vivo o muerto." description="Cada cartel cuenta una historia. Encuentra tu próximo objetivo entre los piratas más buscados." action={<span className="count-pill"><Target size={15}/>{meta.totalElements.toLocaleString('es-PE')} objetivos</span>}/>
+-    <section className="filter-panel"><div className="filter-panel-heading"><div><Filter size={16}/><b>FILTRAR ARCHIVO</b></div><button className="text-button" onClick={() => { setSearchInput(''); setSearchParams(new URLSearchParams()) }}>Limpiar filtros <X size={13}/></button></div><div className="filters-grid"><label className="search-field"><Search size={17}/><input value={searchInput} onChange={e => setSearchInput(e.target.value)} placeholder="Buscar por nombre o epíteto…" aria-label="Buscar pirata"/></label><label><span>Estado</span><select value={status} onChange={e => update({ status: e.target.value })}><option value="">Todos los estados</option><option value="ACTIVE">Activo</option><option value="CAPTURED">Capturado</option><option value="DECEASED">Fallecido</option></select></label><label><span>Tripulación</span><select value={crewId} onChange={e => update({ crewId: e.target.value })}><option value="">Todas las tripulaciones</option>{crews.map((crew, index) => <option key={idOf(crew) || index} value={idOf(crew)}>{labelOf(crew, 'name', 'teamName', 'crewName')}</option>)}</select></label><label><span>Fruta del diablo</span><select value={fruit} onChange={e => update({ fruit: e.target.value })}><option value="">Todas las frutas</option>{['PARAMECIA','ZOAN','LOGIA','MYTHICAL_ZOAN','ANCIENT_ZOAN'].map(v => <option key={v} value={v}>{v.replaceAll('_',' ')}</option>)}</select></label></div><div className="filter-footer"><span>{loading ? 'Actualizando archivo…' : `Mostrando ${items.length} de ${meta.totalElements} carteles`}</span><label className="sort-control">ORDENAR POR <select value={sort} onChange={e => update({ sort: e.target.value })}><option value="bounty,desc">Mayor recompensa</option><option value="name,asc">Nombre A–Z</option><option value="updatedAt,desc">Actualizados recientemente</option></select></label></div></section>
+-    {error ? <ErrorState message={error} retry={() => setSearchParams(new URLSearchParams(searchParams))}/> : loading ? <LoadingState text="Rastreando carteles en el archivo…"/> : items.length === 0 ? <EmptyState title="No hay objetivos en el radar" detail="Prueba con otros filtros o una búsqueda diferente."/> : <><div className="wanted-grid">{items.map((item, index) => <WantedCard item={item} key={idOf(item) || index}/>)}</div><div className="pagination"><span>PÁGINA <b>{page + 1}</b> DE <b>{Math.max(1, meta.totalPages)}</b></span><div><button className="page-arrow" disabled={page <= 0 || loading} onClick={() => update({ page: String(page - 1) }, false)} aria-label="Página anterior"><ArrowLeft size={16}/></button><button className="page-arrow" disabled={page + 1 >= meta.totalPages || loading} onClick={() => update({ page: String(page + 1) }, false)} aria-label="Página siguiente"><ArrowRight size={16}/></button></div><label className="page-size">POR PÁGINA <select value={String(size)} onChange={e => update({ size: e.target.value })}>{allowedSizes.map(s => <option key={s}>{s}</option>)}</select></label></div></>}
+-  </div>
+-}
+-function WantedCard({ item }: { item: WantedItem }) {
+-  const name = labelOf(item, 'name', 'pirateName', 'characterName', 'title'); const epithet = labelOf(item, 'epithet', 'nickname', 'alias'); const bounty = item.bounty ?? item.reward ?? item.bountyAmount
+-  const image = str(item.imageUrl ?? item.image_url ?? item.portraitUrl); const status = labelOf(item, 'status')
+-  return <Link className="wanted-card" to={`/wanted/${encodeURIComponent(idOf(item))}`}><div className="wanted-card-art">{image ? <img src={image} alt={`Retrato de ${name}`} loading="lazy"/> : <div className="wanted-placeholder"><Skull size={54} strokeWidth={1}/><span>WANTED</span></div>}<span className={`wanted-status ${status.toLowerCase() === 'active' ? 'status-active' : ''}`}>{status.replaceAll('_',' ')}</span><span className="wanted-card-index">NO. {idOf(item) || '—'}</span></div><div className="wanted-card-info"><div className="wanted-epithet">{epithet}</div><h3>{name}</h3><div className="bounty-label">RECOMPENSA</div><div className="bounty-amount">{money(bounty)}</div><div className="wanted-card-meta"><span>{labelOf(asRecord(item.crew), 'name', 'teamName') === 'Sin título' ? labelOf(item, 'crewName', 'crew') : labelOf(asRecord(item.crew), 'name', 'teamName')}</span><ArrowRight size={15}/></div></div></Link>
+-}
+-function WantedDetail() {
+-  const { id = '' } = useParams(); const navigate = useNavigate(); const [item, setItem] = useState<WantedItem | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState('')
+-  const load = useCallback(() => { setLoading(true); setError(''); request<unknown>(`/wanted/${encodeURIComponent(id)}`).then(data => setItem(asRecord(asRecord(data).item ?? data) as WantedItem)).catch(e => setError(prettyError(e))).finally(() => setLoading(false)) }, [id])
+-  useEffect(() => { void load() }, [load])
+-  return <div className="page-content detail-page"><button className="back-link" onClick={() => navigate(-1)}><ArrowLeft size={16}/> Volver al archivo</button>{error ? <ErrorState message={error} retry={() => void load()}/> : loading ? <LoadingState/> : item && <><PageHeading eyebrow="ARCHIVO · FICHA DE OBJETIVO" title="Expediente" highlight={labelOf(item,'name','pirateName','title')+'.'} description="Información registrada en el archivo de recompensas de la Guild."/><div className="wanted-detail-layout"><div className="wanted-detail-poster"><WantedCard item={item}/></div><div className="detail-info-panel"><div className="section-kicker"><span className="kicker-line"/> DATOS DEL OBJETIVO</div><h2>{labelOf(item,'epithet','nickname','alias')}</h2><dl className="detail-list">{[['Nombre',labelOf(item,'name','pirateName','characterName')],['Recompensa',money(item.bounty ?? item.reward ?? item.bountyAmount)],['Estado',labelOf(item,'status').replaceAll('_',' ')],['Fruta del diablo',labelOf(item,'fruitType','fruit','devilFruit')],['Tripulación',labelOf(asRecord(item.crew),'name','teamName') === 'Sin título' ? labelOf(item,'crewName') : labelOf(asRecord(item.crew),'name','teamName')],['Última actualización',labelOf(item,'updatedAt','updated_at')]].map(([k,v]) => <div className="detail-row" key={k}><dt>{k}</dt><dd>{v || '—'}</dd></div>)}</dl><p className="detail-disclaimer">Este expediente refleja la información devuelta por el servidor de la Guild.</p></div></div></>}</div>
+-}
+-
+-function NewsPage() {
+-  const [params, setParams] = useSearchParams(); const type = params.get('type') ?? ''; const priority = params.get('priority') ?? ''; const status = params.get('status') ?? ''
+-  const [items, setItems] = useState<NewsItem[]>([]); const [nextCursor, setNextCursor] = useState<string | null>(null); const [hasMore, setHasMore] = useState(true); const [loading, setLoading] = useState(false); const [initial, setInitial] = useState(true); const [error, setError] = useState(''); const [refreshIndex, setRefreshIndex] = useState(0)
+-  const filterKey = `${type}|${priority}|${status}|${refreshIndex}`; const seen = useRef(new Set<string>()); const inFlight = useRef(false); const sentinel = useRef<HTMLDivElement | null>(null); const generation = useRef(0)
+-  useEffect(() => {
+-    const controller = new AbortController(); const currentGeneration = ++generation.current
+-    seen.current = new Set(); setItems([]); setNextCursor(null); setHasMore(true); setError(''); setInitial(true); setLoading(false); inFlight.current = false
+-    const paramsString = queryString({ type: type || undefined, priority: priority || undefined, status: status || undefined, limit: 20 })
+-    setLoading(true); inFlight.current = true
+-    request<unknown>(`/news/feed${paramsString}`, {}, controller.signal).then(data => {
+-      if (currentGeneration !== generation.current) return
+-      const r = asRecord(data); const rows = asArray(r.items ?? r.content ?? r.results).map(asRecord) as NewsItem[]; const unique = rows.filter(item => { const key = idOf(item); if (!key || seen.current.has(key)) return false; seen.current.add(key); return true })
+-      setItems(unique); setNextCursor(typeof r.nextCursor === 'string' && r.nextCursor ? r.nextCursor : null); setHasMore(Boolean(r.hasMore));
+-    }).catch(e => { if (!controller.signal.aborted && currentGeneration === generation.current) setError(prettyError(e)) }).finally(() => { if (currentGeneration === generation.current) { setLoading(false); setInitial(false); inFlight.current = false } })
+-    return () => controller.abort()
+-  }, [filterKey])
+-  const loadMore = useCallback(async () => {
+-    if (inFlight.current || loading || !hasMore || !nextCursor) return
+-    inFlight.current = true; setLoading(true); setError(''); const currentGeneration = generation.current
+-    try {
+-      const data = await request<unknown>(`/news/feed${queryString({ cursor: nextCursor, limit: 20, type: type || undefined, priority: priority || undefined, status: status || undefined })}`)
+-      if (currentGeneration !== generation.current) return
+-      const r = asRecord(data); const rows = asArray(r.items ?? r.content ?? r.results).map(asRecord) as NewsItem[]; const unique = rows.filter(item => { const key = idOf(item); if (!key || seen.current.has(key)) return false; seen.current.add(key); return true })
+-      setItems(prev => [...prev, ...unique]); setNextCursor(typeof r.nextCursor === 'string' && r.nextCursor ? r.nextCursor : null); setHasMore(Boolean(r.hasMore))
+-    } catch (e) { if (currentGeneration === generation.current) setError(prettyError(e)) } finally { if (currentGeneration === generation.current) { setLoading(false); inFlight.current = false } }
+-  }, [hasMore, loading, nextCursor, priority, status, type])
+-  useEffect(() => { const element = sentinel.current; if (!element || !hasMore || error || initial) return; const observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) void loadMore() }, { rootMargin: '320px' }); observer.observe(element); return () => observer.disconnect() }, [loadMore, hasMore, error, initial, items.length])
+-  function updateFilter(key: string, value: string) { const next = new URLSearchParams(params); value ? next.set(key,value) : next.delete(key); setParams(next) }
+-  return <div className="page-content"><PageHeading eyebrow="GRAND LINE · NEWS COO" title="El mundo" highlight="no se detiene." description="Rumores, reportes y noticias que pueden cambiar el curso de la historia." action={<span className="count-pill"><Globe2 size={15}/> TRANSMISIÓN GLOBAL</span>}/>
+-    <div className="news-filter-bar"><div className="news-filter-title"><Newspaper size={17}/><span>FILTRO DE TRANSMISIONES</span></div><label><span>Tipo</span><select value={type} onChange={e => updateFilter('type',e.target.value)}><option value="">Todos</option>{['POLITICS','PIRATES','MARINES','ECONOMY','WORLD_EVENT','OTHER'].map(v => <option key={v}>{v}</option>)}</select></label><label><span>Prioridad</span><select value={priority} onChange={e => updateFilter('priority',e.target.value)}><option value="">Todas</option>{['LOW','MEDIUM','HIGH','CRITICAL'].map(v => <option key={v}>{v}</option>)}</select></label><label><span>Estado</span><select value={status} onChange={e => updateFilter('status',e.target.value)}><option value="">Todos</option>{['RUMOR','CONFIRMED','DEBUNKED'].map(v => <option key={v}>{v}</option>)}</select></label></div>
+-    {error && <div className="inline-error"><span>{error}</span><button className="secondary-btn" onClick={() => { if (items.length && nextCursor) void loadMore(); else setRefreshIndex(v => v+1) }}>Reintentar <ArrowRight size={14}/></button></div>}
+-    {initial && loading ? <LoadingState text="News Coo está buscando señales…"/> : items.length === 0 && !loading ? <EmptyState title="Silencio en las ondas" detail="No se encontraron noticias con los filtros actuales."/> : <div className="news-layout"><div className="news-feed">{items.map((item,index) => <NewsCard item={item} key={idOf(item) || index}/>) }<div ref={sentinel} className="feed-sentinel" aria-hidden="true"/>{loading && <div className="feed-loading"><span className="spinner dark-spinner"/> Recibiendo nuevas transmisiones…</div>}{!hasMore && !loading && <div className="feed-end"><span/> FIN DE TRANSMISIÓN <span/></div>}</div><aside className="news-aside"><div className="broadcast-card"><div className="broadcast-icon"><Bell size={21}/></div><span className="destination-number">NEWS COO NETWORK</span><h3>El rumor vuela.<br/><em>La verdad permanece.</em></h3><p>Verifica los reportes marcados como rumor para ayudar a la Guild a separar hechos de ficción.</p><div className="broadcast-stat"><span>REPORTES EN TU FEED</span><b>{items.length}</b></div></div><div className="broadcast-tip"><Shield size={18}/><p>Solo los reportes en estado <b>RUMOR</b> pueden confirmarse o desmentirse.</p></div></aside></div>}
+-  </div>
+-}
+-function NewsCard({ item }: { item: NewsItem }) {
+-  const priority = labelOf(item,'priority').toLowerCase(); const status = labelOf(item,'status'); const type = labelOf(item,'type').replaceAll('_',' ')
+-  return <Link to={`/news/${encodeURIComponent(idOf(item))}`} className="news-card"><div className={`news-priority priority-${priority}`}/><div className="news-card-content"><div className="news-meta"><span className="news-type">{type}</span><span className={`news-status status-${status.toLowerCase()}`}>{status}</span><span className="news-date">{labelOf(item,'publishedAt','published_at','createdAt','date')}</span></div><h3>{labelOf(item,'title','headline')}</h3><p>{labelOf(item,'summary','excerpt','description')}</p><div className="news-card-bottom"><span>{labelOf(item,'source','origin','author')}</span><span className="read-report">LEER REPORTE <ArrowRight size={14}/></span></div></div><div className="news-card-arrow"><ArrowRight size={17}/></div></Link>
+-}
+-function NewsDetail() {
+-  const { id = '' } = useParams(); const navigate = useNavigate(); const [item, setItem] = useState<NewsItem | null>(null); const [loading,setLoading] = useState(true); const [error,setError] = useState(''); const [busy,setBusy] = useState(false); const [notice,setNotice] = useState('')
+-  const load = useCallback(() => { setLoading(true); setError(''); request<unknown>(`/news/${encodeURIComponent(id)}`).then(data => setItem(asRecord(asRecord(data).item ?? data) as NewsItem)).catch(e => setError(prettyError(e))).finally(() => setLoading(false)) },[id])
+-  useEffect(() => { void load() },[load])
+-  async function verify(status: 'CONFIRMED'|'DEBUNKED') { if (!item || busy) return; setBusy(true); setNotice(''); setError(''); try { const data = await request<unknown>(`/news/${encodeURIComponent(id)}/status`,{method:'PATCH',body:JSON.stringify({status})}); setItem(asRecord(asRecord(data).item ?? data) as NewsItem); setNotice(status === 'CONFIRMED' ? 'Noticia confirmada. La Guild ha actualizado el reporte.' : 'Noticia desmentida. La Guild ha actualizado el reporte.'); window.dispatchEvent(new CustomEvent('logpose:news-updated',{detail:{id,status}})) } catch(e) { setError(prettyError(e)) } finally { setBusy(false) } }
+-  const status = labelOf(item ?? {},'status')
+-  return <div className="page-content detail-page"><button className="back-link" onClick={() => navigate(-1)}><ArrowLeft size={16}/> Volver a News Coo</button>{error && !item ? <ErrorState message={error} retry={() => void load()}/> : loading ? <LoadingState/> : item && <article className="news-detail"><div className="section-kicker"><span className="kicker-line"/> NEWS COO · REPORTE #{id}</div><div className="news-detail-tags"><span className="news-type">{labelOf(item,'type').replaceAll('_',' ')}</span><span className={`news-status status-${status.toLowerCase()}`}>{status}</span><span className="news-date">{labelOf(item,'publishedAt','published_at','createdAt','date')}</span></div><h1>{labelOf(item,'title','headline')}</h1><p className="news-detail-lede">{labelOf(item,'summary','excerpt')}</p><div className="news-detail-byline"><span className="byline-icon"><Newspaper size={17}/></span><div><b>{labelOf(item,'source','origin','author')}</b><small>Fuente registrada en la transmisión</small></div><span className={`priority-label priority-text-${labelOf(item,'priority').toLowerCase()}`}>PRIORIDAD {labelOf(item,'priority')}</span></div><div className="news-article-body">{labelOf(item,'body','content','description')}</div>{error && <div className="error-box"><X size={16}/>{error}</div>}{notice && <div className="success-box"><Check size={16}/>{notice}</div>}{status === 'RUMOR' ? <div className="verify-panel"><div><div className="section-kicker"><span className="kicker-line"/> VERIFICACIÓN DE LA GUILD</div><h3>¿Qué tan confiable es este reporte?</h3><p>Tu decisión actualizará el estado de la noticia para toda tu tripulación.</p></div><div className="verify-actions"><button className="confirm-btn" disabled={busy} onClick={() => void verify('CONFIRMED')}><Check size={16}/> Confirmar</button><button className="debunk-btn" disabled={busy} onClick={() => void verify('DEBUNKED')}><X size={16}/> Desmentir</button></div></div> : <div className="verified-panel"><Shield size={19}/><span>Este reporte ya fue marcado como <b>{status}</b>. Solo los rumores pueden verificarse.</span></div>}</article>}</div>
+-}
+-
+-function SagasPage() {
+-  const [items,setItems] = useState<SagaItem[]>([]); const [loading,setLoading] = useState(true); const [error,setError] = useState('')
+-  const load = useCallback(() => { setLoading(true); setError(''); request<unknown>('/sagas').then(data => { const r=asRecord(data); setItems(asArray(r.items ?? r.content ?? r.sagas ?? data).map(asRecord) as SagaItem[]) }).catch(e=>setError(prettyError(e))).finally(()=>setLoading(false)) },[])
+-  useEffect(()=>{void load()},[load])
+-  return <div className="page-content saga-index"><PageHeading eyebrow="GRAND LINE · ARCHIVO HISTÓRICO" title="La historia" highlight="que el mundo olvidó." description="Cada isla guarda un fragmento. Cada Poneglyph, una verdad que alguien quiso enterrar."/><div className="saga-intro-banner"><div className="saga-intro-art"><div className="saga-orbit orbit-a"/><div className="saga-orbit orbit-b"/><div className="saga-stone"><span>古代</span><span>歴史</span><span>真実</span></div></div><div><span className="destination-number">ARCHIVO CLASIFICADO · NIVEL I</span><h2>El pasado no desaparece.<br/><em>Solo espera ser leído.</em></h2><p>Recorre las sagas a través de los datos históricos registrados por la Guild. La historia se revela etapa por etapa, isla por isla.</p></div></div>
+-    {error ? <ErrorState message={error} retry={() => void load()}/> : loading ? <LoadingState text="Descifrando los registros antiguos…"/> : items.length === 0 ? <EmptyState title="No hay registros disponibles" detail="El archivo de sagas no devolvió resultados."/> : <><div className="section-title-row"><div><div className="section-kicker"><span className="kicker-line"/> REGISTROS RECUPERADOS</div><h2>Sagas disponibles</h2></div><span className="updated-label">{items.length} REGISTROS</span></div><div className="sagas-grid">{items.map((item,index)=> <SagaCard item={item} index={index} key={idOf(item)||index}/>)}</div></>}
+-  </div>
+-}
+-function SagaCard({ item,index }: { item: SagaItem; index: number }) {
+-  const id = idOf(item); const name = labelOf(item,'title','name','sagaName'); const description = labelOf(item,'summary','description','synopsis'); const stages = asArray(item.stages ?? item.episodes ?? item.stageCount).length || num(item.stageCount ?? item.stagesCount,0)
+-  return <Link to={`/sagas/${encodeURIComponent(id)}`} className={`saga-card saga-tone-${index%4}`}><div className="saga-card-art"><div className="saga-card-orbit"/><div className="saga-card-number">{String(index+1).padStart(2,'0')}</div><div className="saga-card-glyph"><BookOpen size={39} strokeWidth={1}/></div><span className="saga-card-coord">HISTORICAL LOG / {String(index+1).padStart(2,'0')}</span></div><div className="saga-card-info"><span className="destination-number">REGISTRO DE SAGA</span><h3>{name}</h3><p>{description}</p><div className="saga-card-footer"><span>{stages ? `${stages} ETAPAS` : 'HISTORIA DISPONIBLE'}</span><span>INICIAR VIAJE <ArrowRight size={14}/></span></div></div></Link>
+-}
+-function SagaStory() {
+-  const {id=''}=useParams(); const navigate=useNavigate(); const [story,setStory]=useState<Record<string,unknown>|null>(null); const [loading,setLoading]=useState(true); const [error,setError]=useState(''); const [active,setActive]=useState(0); const stageRefs=useRef<Array<HTMLElement|null>>([]); const location=useLocation()
+-  const stages = useMemo(()=>asArray(story?.stages ?? asRecord(story?.story).stages).map(asRecord),[story])
+-  const saga = asRecord(story?.saga ?? story)
+-  const load=useCallback(()=>{setLoading(true);setError('');request<unknown>(`/sagas/${encodeURIComponent(id)}/story`).then(data=>{const r=asRecord(data);setStory(r);const current=new URLSearchParams(window.location.search).get('stage');const idx=stagesIndex(r,current);setActive(idx)}).catch(e=>setError(prettyError(e))).finally(()=>setLoading(false))},[id])
+-  useEffect(()=>{void load()},[load])
+-  useEffect(()=>{const params=new URLSearchParams(location.search);const stage=params.get('stage');if(stage&&stages.length){const idx=stages.findIndex((s,i)=>str(s.id)===stage||String(i+1)===stage);if(idx>=0)setActive(idx)}},[location.search,stages])
+-  useEffect(()=>{if(loading||stages.length===0)return;const nodes=stageRefs.current.filter((node):node is HTMLElement=>node!==null);if(!('IntersectionObserver' in window))return;const observer=new IntersectionObserver(entries=>{const visible=entries.filter(e=>e.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(visible){const idx=nodes.indexOf(visible.target as HTMLElement);if(idx>=0){setActive(idx);const stageId=idOf(stages[idx])||String(idx+1);const url=new URL(window.location.href);url.searchParams.set('stage',stageId);window.history.replaceState(null,'',url)}}},{threshold:[0.25,0.5,0.75],rootMargin:'-15% 0px -25% 0px'});nodes.forEach(n=>observer.observe(n));return()=>observer.disconnect()},[loading,stages])
+-  function goToStage(index:number){const safe=Math.min(stages.length-1,Math.max(0,index));setActive(safe);const stageId=idOf(stages[safe])||String(safe+1);const target=stageRefs.current[safe];if(target){target.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'center'});const url=new URL(window.location.href);url.searchParams.set('stage',stageId);window.history.replaceState(null,'',url)}}
+-  useEffect(()=>{function keyHandler(e:KeyboardEvent){if(e.altKey||e.ctrlKey||e.metaKey)return;if(e.key==='ArrowDown'||e.key==='ArrowRight'){e.preventDefault();goToStage(active+1)}if(e.key==='ArrowUp'||e.key==='ArrowLeft'){e.preventDefault();goToStage(active-1)}}window.addEventListener('keydown',keyHandler);return()=>window.removeEventListener('keydown',keyHandler)})
+-  return <div className="story-page">{error?<div className="page-content"><ErrorState message={error} retry={()=>void load()}/></div>:loading?<div className="page-content"><LoadingState text="Descifrando la historia de la saga…"/></div>:<><div className="story-top"><button className="back-link" onClick={()=>navigate('/sagas')}><ArrowLeft size={16}/> Archivo de sagas</button><div className="story-top-right"><span>HISTORIA INTERACTIVA</span><span>{String(active+1).padStart(2,'0')} / {String(stages.length).padStart(2,'0')}</span></div></div><div className="story-hero"><div className="story-hero-map"><div className="map-grid-lines"/><div className="map-continent continent-one"/><div className="map-continent continent-two"/><div className="map-route" style={{'--route-progress':`${stages.length>1?active/(stages.length-1)*100:100}%`} as CSSProperties}/>{stages.map((stage,index)=>{const island=asRecord(stage.island);return <button className={`map-pin ${index===active?'pin-active':''} ${index<active?'pin-visited':''}`} key={idOf(stage)||index} style={{left:`${12+(num(island.x ?? stage.x,index*17)%76)}%`,top:`${18+(num(island.y ?? stage.y,index*13)%64)}%`}} onClick={()=>goToStage(index)} aria-label={`Ir a etapa ${index+1}`}><span>{index<active?<Check size={12}/>:index+1}</span></button>})}<div className="map-ship" style={{left:`${12+(num(asRecord(stages[active]?.island).x ?? stages[active]?.x,active*17)%76)}%`,top:`${18+(num(asRecord(stages[active]?.island).y ?? stages[active]?.y,active*13)%64)}%`}}><Ship size={22}/></div><span className="map-label map-label-a">GRAND LINE</span><span className="map-label map-label-b">ROUTE / {String(active+1).padStart(2,'0')}</span></div><div className="story-hero-copy"><div className="section-kicker"><span className="kicker-line"/> PONEGLYPH · ARCHIVO HISTÓRICO</div><h1>{labelOf(saga,'title','name','sagaName')}</h1><p>{labelOf(saga,'description','summary','synopsis')}</p><div className="story-progress-label"><span>PROGRESO DEL RECORRIDO</span><b>{stages.length?Math.round((active+1)/stages.length*100):0}%</b></div><div className="progress-track"><span style={{width:`${stages.length?(active+1)/stages.length*100:0}%`}}/></div><div className="story-hero-foot"><span><Compass size={15}/> {stages.length} ETAPAS REGISTRADAS</span><span><ArrowDown size={15}/> DESLIZA PARA DESCUBRIR</span></div></div></div><div className="story-body"><aside className="story-sidebar"><div className="story-sidebar-title"><span className="section-kicker">RUTA HISTÓRICA</span><span>{stages.length} ISLAS</span></div><div className="story-stage-nav">{stages.map((stage,index)=><button key={idOf(stage)||index} className={active===index?'stage-nav-active':''} onClick={()=>goToStage(index)}><span className="stage-nav-number">{index<active?<Check size={13}/>:String(index+1).padStart(2,'0')}</span><span><b>{labelOf(stage,'title','name','stageName') || `Etapa ${index+1}`}</b><small>{labelOf(asRecord(stage.island),'name','title') === 'Sin título' ? labelOf(stage,'islandName','location') : labelOf(asRecord(stage.island),'name','title')}</small></span></button>)}</div><div className="keyboard-hint"><span>↑</span><span>↓</span> Navega entre etapas</div></aside><div className="story-stages">{stages.map((stage,index)=>{const island=asRecord(stage.island);const palette=asRecord(stage.palette ?? stage.colors);const metrics=asRecord(stage.metrics);const isActive=index===active;return <section ref={node=>{stageRefs.current[index]=node}} key={idOf(stage)||index} className={`story-stage ${isActive?'story-stage-active':''}`} style={{'--stage-accent':str(palette.primary ?? palette.accent,'#d3a760'),'--stage-background':str(palette.background,'#17231f')} as CSSProperties} tabIndex={0} aria-label={`Etapa ${index+1}: ${labelOf(stage,'title','name','stageName')}`}><div className="stage-topline"><span>ETAPA {String(index+1).padStart(2,'0')}</span><span>{labelOf(island,'region','sea','location') === 'Sin título' ? labelOf(stage,'region','sea') : labelOf(island,'region','sea','location')}</span></div><div className="stage-island-art"><div className="stage-sun"/><div className="stage-mountain mountain-back"/><div className="stage-mountain mountain-front"/><div className="stage-island-ground"/><span className="stage-coordinate">{str(island.coordinates ?? island.position ?? stage.coordinates,'GRAND LINE')}</span></div><div className="stage-story-content"><div className="section-kicker"><span className="kicker-line"/> {labelOf(island,'name','title') === 'Sin título' ? labelOf(stage,'islandName','location','island') : labelOf(island,'name','title')}</div><h2>{labelOf(stage,'title','name','stageName') || `Etapa ${index+1}`}</h2><p>{labelOf(stage,'narrative','story','description','content')}</p><div className="stage-metrics">{Object.entries(metrics).slice(0,4).map(([key,value])=><div key={key}><span>{key.replaceAll(/([A-Z])/g,' $1').replaceAll('_',' ').toUpperCase()}</span><b>{typeof value==='object'&&value!==null?JSON.stringify(value):str(value,'—')}</b></div>)}</div><div className="stage-controls"><span>{isActive?'ISLA ACTIVA':'ETAPA DEL RECORRIDO'}</span><div><button disabled={index===0} onClick={()=>goToStage(index-1)} aria-label="Etapa anterior"><ArrowLeft size={16}/></button><button disabled={index===stages.length-1} onClick={()=>goToStage(index+1)} aria-label="Siguiente etapa"><ArrowRight size={16}/></button></div></div></div></section>})}<div className="story-finale"><div className="finale-icon"><Compass size={26}/></div><span className="destination-number">FIN DEL REGISTRO</span><h2>El viaje continúa.</h2><p>Has recorrido todas las etapas disponibles de esta saga. La historia del mundo todavía guarda secretos.</p><button className="primary-btn" onClick={()=>navigate('/sagas')}>Volver al archivo <ArrowRight size={16}/></button></div></div></div></>}</div>
+-}
+-function stagesIndex(data:Record<string,unknown>,current:string|null):number{const r=asRecord(data);const saga=asRecord(r.story);const stages=asArray(r.stages??saga.stages).map(asRecord);if(!current)return 0;const found=stages.findIndex((s,i)=>str(s.id)===current||String(i+1)===current);return found>=0?found:0}
+-function NotFound(){return <div className="not-found"><div className="not-found-mark"><Compass size={46}/><span>404</span></div><div className="section-kicker"><span className="kicker-line"/> COORDENADAS DESCONOCIDAS</div><h1>Te saliste del <em>mapa.</em></h1><p>Esta ruta no aparece en los registros de la Guild. Regresa al puerto antes de perder el rumbo.</p><Link className="primary-btn" to="/">Volver al puente de mando <ArrowRight size={16}/></Link></div>}
+diff --git a/README.md b/README.md
+index 4651ace..3d12cfb 100644
+--- a/README.md
++++ b/README.md
+@@ -1,47 +1,81 @@
+ # Log Pose Console — One Piece: Rumbo al Grand Line
+ 
+-Frontend para la hackathon, construido con React 18, TypeScript estricto, Vite, React Router y Tailwind CSS. La información se consulta desde la API del curso; no incluye backend, seeds ni credenciales.
++Frontend de la hackathon en React 18 + TypeScript estricto + Vite + React Router + Tailwind CSS.
++Toda la data viene de la API del curso; no incluye backend, seeds ni credenciales.
+ 
+-## Requisitos
++## Integrantes
+ 
+-- Node.js 24 LTS
+-- npm
+-- Acceso a `https://logpose-api-jg7f.onrender.com`
++| Nombre | Código |
++|:-------|:-------|
++| _Completar_ | _Completar_ |
++| _Completar_ | _Completar_ |
++| _Completar_ | _Completar_ |
+ 
+-## Ejecutar localmente
++## Cómo ejecutar
++
++Requisitos: Node.js 24 LTS y npm.
+ 
+ ```bash
+ npm install
+-cp .env.example .env.local
++cp .env.example .env.local      # PowerShell: Copy-Item .env.example .env.local
+ npm run dev
+ ```
+ 
+-En Windows PowerShell, si no tienes `cp`, usa `Copy-Item .env.example .env.local`. La variable `VITE_API_BASE_URL` apunta por defecto a la API oficial del curso. Puedes cambiarla en `.env.local`.
++`.env.local` debe tener:
+ 
+-## Build de producción
++```txt
++VITE_API_BASE_URL=https://logpose-api-jg7f.onrender.com/api/v1
++```
+ 
+-```bash
+-npm run build
+-npm run preview
++Build de producción: `npm run build` y `npm run preview`.
++
++## Estructura
++
++```txt
++src/
++  api/client.ts        cliente fetch: token Bearer, errores tipados (ApiError), aviso de 401
++  api/types.ts         tipos y enums del contrato (Swagger)
++  auth/AuthContext.tsx sesión: estados checking | authenticated | anonymous | error
++  auth/guards.tsx      PrivateRoute (guarda `from`) y PublicOnlyRoute (redirige a `from`)
++  components/          Layout y estados comunes (loading, error con reintento, vacío, 423)
++  lib/useResource.ts   carga con AbortController + reintento
++  pages/Dashboard.tsx  CP1: /dashboard/summary + /log-pose
++  pages/wanted/        CP2: listado con estado en la URL y detalle
++  pages/news/          CP4: feed con cursor + infinite scroll y verificación de rumores
++  pages/sagas/         CP5: resumen de sagas y scrollytelling
+ ```
+ 
+-## Checkpoints implementados
++## Cómo funciona (resumen por checkpoint)
+ 
+-- **CP1 — Zarpar:** registro, login, sesión persistente, restauración con `/auth/me`, rutas protegidas, logout, dashboard con datos de API, estados de carga/error y página 404.
+-- **CP2 — Se Busca:** filtros combinables, búsqueda con debounce, paginación real del servidor, ordenamiento y tamaño de página sincronizados con la URL, cancelación de solicitudes anteriores y detalle del objetivo.
+-- **CP3 — Reverse Mountain:** visualización del estado real del Log Pose y acceso a News Coo / Poneglyph sujeto al control de acceso de la API.
+-- **CP4 — News Coo:** feed con cursor, carga al acercarse al final, deduplicación, filtros en URL, detalle y verificación de rumores con loading/error.
+-- **CP5 — Poneglyph:** resumen de sagas y narración por etapas, mapa persistente con ruta recorrida, métricas por etapa, progreso, navegación por teclado, URL por etapa y soporte de `prefers-reduced-motion`.
++**CP1 — Zarpar.** Si hay token guardado, la app arranca en estado `checking` y valida con `/auth/me`
++mostrando una pantalla de carga (nunca el login). `PrivateRoute` manda al login guardando la ubicación
++completa (`pathname + search + hash`) en `state.from`; al iniciar sesión, `PublicOnlyRoute` redirige ahí
++con `replace`. Cualquier 401 (o el vencimiento de `expiresAt`) cierra la sesión y vuelve al login.
++El registro devuelve la sesión iniciada; los errores 400/409 se muestran junto al campo correspondiente.
+ 
+-## Antes de entregar
++**CP2 — Se Busca.** La URL es la única fuente de verdad (`useSearchParams`). Cada valor se valida contra
++el contrato y se normaliza con `replace`. Cambiar filtro/búsqueda/orden/tamaño borra `page` en la misma
++actualización; si la API indica que la página no existe, se corrige a la última válida. La búsqueda usa
++debounce (400 ms). Cada request se cancela con `AbortController` cuando cambia la URL, así una respuesta
++vieja nunca pisa la nueva. Se conserva la página anterior mientras carga (sin saltos de layout). El
++detalle vuelve con `navigate(-1)`: misma URL, mismo listado y misma posición de scroll.
+ 
+-1. Completar `hackathon.json` con el `TEAM_CODE` de la cuenta usada para CP3 y los nombres/códigos de los tres integrantes.
+-2. Verificar en Swagger los nombres exactos de campos de respuestas y enums del workspace de la tripulación. Los componentes aceptan variantes comunes, pero el contrato de la API es la fuente de verdad.
+-3. Registrar la tripulación oficial y probar el flujo completo con las credenciales del equipo; no subir credenciales al repositorio.
+-4. Ejecutar `npm run build` y subir el `package-lock.json` generado por `npm install`.
++**CP4 — News Coo.** Feed por cursor con `IntersectionObserver` sobre un sentinel; un `ref` impide más de
++una carga en vuelo y un `Set` de ids evita duplicados. Al cambiar filtros se aborta la carga en vuelo y se
++descarta cualquier respuesta de otros filtros. Un error en una carga adicional no borra lo cargado. El
++feed se guarda en memoria por filtros: al volver del detalle se restaura sin pedir de nuevo y en la misma
++posición. La verificación deshabilita los botones en vuelo, muestra confirmación o un error con
++reintento, y actualiza el feed guardado.
+ 
+-## Estructura
++**CP5 — Poneglyph.** `/sagas/:id?stage=<slug>`: la URL indica la etapa activa y abrirla salta directo a
++esa etapa. La etapa activa sale del scroll; el mapa SVG (coordenadas reales de la API) es persistente
++(sticky en desktop y mobile), dibuja la ruta recorrida y mueve el barco. Colores y métricas salen de la
++etapa activa. Progreso con CSS Scroll-driven Animations (`animation-timeline`) y respaldo en JS. View
++Transition API entre el listado y la historia cuando existe. Teclado: `←/→` o `j/k`, y `Tab` recorre las
++etapas. Con `prefers-reduced-motion` no hay animaciones y todo el contenido queda visible.
++
++## Antes de entregar
+ 
+-- `src/api.ts`: cliente Fetch con JWT, manejo de errores y helpers de tipado seguro.
+-- `src/App.tsx`: rutas, autenticación y páginas de los cinco checkpoints.
+-- `src/styles.css`: sistema visual adaptable a escritorio y móvil.
++1. Completar `hackathon.json` con el `TEAM_CODE` de la cuenta con la que pidieron la inspección del CP3 y los integrantes.
++2. Completar la tabla de integrantes de este README.
++3. `npm run build` sin errores.
+diff --git a/api.ts b/api.ts
+deleted file mode 100644
+index 2f6e416..0000000
+--- a/api.ts
++++ /dev/null
+@@ -1,48 +0,0 @@
+-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '')
+-  || 'https://logpose-api-jg7f.onrender.com/api/v1'
+-
+-export class ApiError extends Error {
+-  status: number
+-  data: unknown
+-  constructor(message: string, status: number, data: unknown) { super(message); this.name = 'ApiError'; this.status = status; this.data = data }
+-}
+-
+-export function getToken(): string | null { return localStorage.getItem('logpose_token') }
+-export function saveSession(token: string): void { localStorage.setItem('logpose_token', token) }
+-export function clearSession(): void { localStorage.removeItem('logpose_token') }
+-
+-export async function request<T>(path: string, options: RequestInit = {}, signal?: AbortSignal): Promise<T> {
+-  const token = getToken()
+-  const headers = new Headers(options.headers)
+-  if (!(options.body instanceof FormData) && options.body !== undefined) headers.set('Content-Type', 'application/json')
+-  if (token) headers.set('Authorization', `Bearer ${token}`)
+-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers, signal: signal ?? options.signal })
+-  const raw = await response.text()
+-  let data: unknown = null
+-  if (raw) { try { data = JSON.parse(raw) as unknown } catch { data = raw } }
+-  if (!response.ok) {
+-    if (response.status === 401 && path !== '/auth/login' && path !== '/auth/register') {
+-      clearSession()
+-      window.dispatchEvent(new Event('logpose:unauthorized'))
+-    }
+-    const record = asRecord(data)
+-    const detail = record.detail ?? record.message ?? record.error
+-    const message = typeof detail === 'string' ? detail : `Error ${response.status}: no se pudo completar la solicitud.`
+-    throw new ApiError(message, response.status, data)
+-  }
+-  return data as T
+-}
+-
+-export function asRecord(value: unknown): Record<string, unknown> {
+-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+-}
+-export function asArray(value: unknown): unknown[] { return Array.isArray(value) ? value : [] }
+-export function str(value: unknown, fallback = ''): string { return typeof value === 'string' || typeof value === 'number' ? String(value) : fallback }
+-export function num(value: unknown, fallback = 0): number { return typeof value === 'number' && Number.isFinite(value) ? value : fallback }
+-export function prettyError(error: unknown): string { return error instanceof Error ? error.message : 'Ocurrió un error inesperado.' }
+-export function queryString(values: Record<string, string | number | undefined>): string {
+-  const params = new URLSearchParams()
+-  Object.entries(values).forEach(([key, value]) => { if (value !== undefined && String(value).trim() !== '') params.set(key, String(value)) })
+-  const result = params.toString()
+-  return result ? `?${result}` : ''
+-}
+diff --git a/main.tsx b/main.tsx
+deleted file mode 100644
+index 29eacd8..0000000
+--- a/main.tsx
++++ /dev/null
+@@ -1,7 +0,0 @@
+-import React from 'react'
+-import { createRoot } from 'react-dom/client'
+-import { BrowserRouter } from 'react-router-dom'
+-import App from './App'
+-import './styles.css'
+-
+-createRoot(document.getElementById('root')!).render(<React.StrictMode><BrowserRouter><App /></BrowserRouter></React.StrictMode>)
+diff --git a/src/App.tsx b/src/App.tsx
+new file mode 100644
+index 0000000..4b6f0f9
+--- /dev/null
++++ b/src/App.tsx
+@@ -0,0 +1,63 @@
++import { useLayoutEffect } from 'react'
++import { Link, Route, Routes, useLocation, useNavigationType } from 'react-router-dom'
++import { ArrowRight, Compass } from 'lucide-react'
++import { PrivateRoute, PublicOnlyRoute } from './auth/guards'
++import { Layout } from './components/Layout'
++import { AuthPage } from './pages/AuthPage'
++import { Dashboard } from './pages/Dashboard'
++import { NewsDetailPage } from './pages/news/NewsDetailPage'
++import { NewsFeedPage } from './pages/news/NewsFeedPage'
++import { SagaStory } from './pages/sagas/SagaStory'
++import { SagasPage } from './pages/sagas/SagasPage'
++import { WantedDetail } from './pages/wanted/WantedDetail'
++import { WantedList } from './pages/wanted/WantedList'
++
++// Al entrar a una pantalla nueva se empieza arriba. Con atrás/adelante (POP) no:
++// cada listado restaura su propia posición.
++function ScrollToTop() {
++  const { pathname } = useLocation()
++  const navigationType = useNavigationType()
++  useLayoutEffect(() => {
++    if (navigationType !== 'POP') window.scrollTo(0, 0)
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [pathname])
++  return null
++}
++
++function NotFound() {
++  return (
++    <div className="not-found">
++      <div className="not-found-mark"><Compass size={46} /><span>404</span></div>
++      <div className="section-kicker"><span className="kicker-line" /> COORDENADAS DESCONOCIDAS</div>
++      <h1>Te saliste del <em>mapa.</em></h1>
++      <p>Esta ruta no aparece en los registros de la Guild.</p>
++      <Link className="primary-btn" to="/">Volver al puente de mando <ArrowRight size={16} /></Link>
++    </div>
++  )
++}
++
++export default function App() {
++  return (
++    <>
++      <ScrollToTop />
++      <Routes>
++        <Route element={<PublicOnlyRoute />}>
++          <Route path="/login" element={<AuthPage mode="login" />} />
++          <Route path="/register" element={<AuthPage mode="register" />} />
++        </Route>
++        <Route element={<PrivateRoute />}>
++          <Route element={<Layout />}>
++            <Route path="/" element={<Dashboard />} />
++            <Route path="/wanted" element={<WantedList />} />
++            <Route path="/wanted/:id" element={<WantedDetail />} />
++            <Route path="/news" element={<NewsFeedPage />} />
++            <Route path="/news/:id" element={<NewsDetailPage />} />
++            <Route path="/sagas" element={<SagasPage />} />
++            <Route path="/sagas/:id" element={<SagaStory />} />
++          </Route>
++        </Route>
++        <Route path="*" element={<NotFound />} />
++      </Routes>
++    </>
++  )
++}
+diff --git a/src/api/client.ts b/src/api/client.ts
+new file mode 100644
+index 0000000..3d6b8e0
+--- /dev/null
++++ b/src/api/client.ts
+@@ -0,0 +1,100 @@
++import type { ApiErrorBody } from './types'
++
++// La URL base SIEMPRE viene de la variable de entorno (nada escrito en el código).
++const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
++const TOKEN_KEY = 'logpose_token'
++
++export class ApiError extends Error {
++  status: number
++  code: string
++  details: { field: string; message: string }[]
++  body: ApiErrorBody | null
++
++  constructor(status: number, code: string, message: string, body: ApiErrorBody | null) {
++    super(message)
++    this.name = 'ApiError'
++    this.status = status
++    this.code = code
++    this.details = body?.details ?? []
++    this.body = body
++  }
++}
++
++export function getToken(): string | null {
++  try { return localStorage.getItem(TOKEN_KEY) } catch { return null }
++}
++export function setToken(token: string | null): void {
++  try {
++    if (token) localStorage.setItem(TOKEN_KEY, token)
++    else localStorage.removeItem(TOKEN_KEY)
++  } catch { /* almacenamiento no disponible: la sesión dura solo en memoria */ }
++}
++
++// Quien maneja la sesión (AuthProvider) se suscribe para enterarse de un 401.
++type Listener = () => void
++const unauthorizedListeners = new Set<Listener>()
++export function onUnauthorized(listener: Listener): () => void {
++  unauthorizedListeners.add(listener)
++  return () => { unauthorizedListeners.delete(listener) }
++}
++
++function isErrorBody(value: unknown): value is ApiErrorBody {
++  return typeof value === 'object' && value !== null && 'code' in value && 'message' in value
++}
++
++export function isAbortError(error: unknown): boolean {
++  return error instanceof DOMException && error.name === 'AbortError'
++}
++
++interface RequestOptions {
++  method?: 'GET' | 'POST' | 'PATCH'
++  body?: unknown
++  signal?: AbortSignal
++}
++
++export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
++  const token = getToken()
++  const headers = new Headers({ Accept: 'application/json' })
++  if (options.body !== undefined) headers.set('Content-Type', 'application/json')
++  if (token) headers.set('Authorization', `Bearer ${token}`)
++
++  let response: Response
++  try {
++    response = await fetch(`${API_BASE}${path}`, {
++      method: options.method ?? 'GET',
++      headers,
++      body: options.body === undefined ? undefined : JSON.stringify(options.body),
++      signal: options.signal,
++    })
++  } catch (error) {
++    if (isAbortError(error)) throw error
++    throw new ApiError(0, 'NETWORK_ERROR', 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.', null)
++  }
++
++  const text = await response.text()
++  let data: unknown = null
++  if (text) {
++    try { data = JSON.parse(text) } catch { data = null }
++  }
++
++  if (!response.ok) {
++    const body = isErrorBody(data) ? data : null
++    // Sesión inválida o vencida: solo si mandamos un token (un login fallido también es 401).
++    if (response.status === 401 && token) unauthorizedListeners.forEach((listener) => listener())
++    const message = body?.message ?? `Error ${response.status}: no se pudo completar la solicitud.`
++    throw new ApiError(response.status, body?.code ?? 'UNKNOWN', message, body)
++  }
++
++  return data as T
++}
++
++export function errorMessage(error: unknown): string {
++  if (error instanceof ApiError) {
++    if (error.code === 'RATE_LIMITED') {
++      const wait = error.body?.retryAfterSeconds
++      return `Demasiadas solicitudes seguidas. Espera ${wait ?? 'unos'} segundos y reintenta.`
++    }
++    return error.message
++  }
++  return 'Ocurrió un error inesperado.'
++}
+diff --git a/src/api/types.ts b/src/api/types.ts
+new file mode 100644
+index 0000000..1642095
+--- /dev/null
++++ b/src/api/types.ts
+@@ -0,0 +1,177 @@
++// Tipos tomados del contrato público de la API (Swagger: /docs).
++
++export const WANTED_STATUSES = ['AT_LARGE', 'CAPTURED', 'MISSING'] as const
++export type WantedStatus = (typeof WANTED_STATUSES)[number]
++
++export const FRUIT_FILTERS = ['PARAMECIA', 'ZOAN', 'LOGIA', 'NONE'] as const
++export type FruitFilter = (typeof FRUIT_FILTERS)[number]
++export type FruitType = Exclude<FruitFilter, 'NONE'>
++
++export const WANTED_SORTS = ['bounty,desc', 'name,asc', 'updatedAt,desc'] as const
++export type WantedSort = (typeof WANTED_SORTS)[number]
++
++export const PAGE_SIZES = [10, 20, 50] as const
++export type PageSize = (typeof PAGE_SIZES)[number]
++
++export const NEWS_TYPES = ['BOUNTY_UPDATE', 'BATTLE', 'MARINE_OPERATION', 'WORLD_GOVERNMENT', 'DISCOVERY'] as const
++export type NewsType = (typeof NEWS_TYPES)[number]
++
++export const NEWS_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const
++export type NewsPriority = (typeof NEWS_PRIORITIES)[number]
++
++export const NEWS_STATUSES = ['RUMOR', 'CONFIRMED', 'DEBUNKED'] as const
++export type NewsStatus = (typeof NEWS_STATUSES)[number]
++
++export type CrewRole =
++  | 'CAPTAIN' | 'FIRST_MATE' | 'NAVIGATOR' | 'SNIPER' | 'COOK' | 'DOCTOR'
++  | 'SHIPWRIGHT' | 'MUSICIAN' | 'ARCHAEOLOGIST' | 'HELMSMAN' | 'FIGHTER'
++
++export interface User { id: string; name: string; email: string }
++export interface Team { code: string; name: string }
++
++export interface LoginResponse {
++  token: string
++  tokenType: 'Bearer'
++  expiresAt: string
++  user: User
++  team: Team
++}
++
++export interface MeResponse { user: User; team: Team; expiresAt: string }
++
++export interface CrewRef { id: string; name: string }
++
++export interface Crew {
++  id: string
++  name: string
++  shipName: string
++  jollyRogerColor: string
++  memberCount: number
++  totalBounty: number
++}
++
++export interface DevilFruit { name: string; type: FruitType }
++
++export interface WantedSummary {
++  id: string
++  name: string
++  epithet: string
++  bounty: number
++  status: WantedStatus
++  crew: CrewRef
++  role: CrewRole
++  devilFruit: DevilFruit | null
++  threatLevel: number
++  lastSeenIsland: string
++  updatedAt: string
++}
++
++export interface WantedDetail extends WantedSummary {
++  age: number
++  heightCm: number
++  bio: string
++  lastSeen: { island: string; seenAt: string }
++  bountyHistory: { amount: number; issuedAt: string }[]
++}
++
++export interface WantedPage {
++  content: WantedSummary[]
++  totalElements: number
++  totalPages: number
++  page: number
++  size: number
++}
++
++export interface DashboardSummary {
++  team: Team
++  wanted: {
++    total: number
++    totalBounty: number
++    averageBounty: number
++    byStatus: Record<WantedStatus, number>
++    byFruit: Record<FruitFilter, number>
++  }
++  crews: { total: number; mostWanted: Crew | null }
++  topBounties: WantedSummary[]
++  generatedAt: string
++}
++
++export interface LogPose {
++  status: 'LOCKED' | 'UNLOCKED'
++  grandLineUnlocked: boolean
++  unlockedAt: string | null
++  message: string
++}
++
++export interface NewsItem {
++  id: string
++  type: NewsType
++  priority: NewsPriority
++  status: NewsStatus
++  title: string
++  summary: string
++  source: string
++  island: string
++  relatedWanted: { id: string; name: string } | null
++  publishedAt: string
++  updatedAt: string
++  verifiedAt: string | null
++}
++
++export interface NewsDetail extends NewsItem { body: string[] }
++
++export interface NewsFeed { items: NewsItem[]; nextCursor: string | null; hasMore: boolean }
++
++export interface Palette { background: string; surface: string; primary: string; accent: string; text: string }
++
++export interface SagaSummary {
++  id: string
++  order: number
++  title: string
++  subtitle: string
++  synopsis: string
++  stageCount: number
++  totalDistanceNm: number
++  firstIsland: string
++  lastIsland: string
++  palette: Palette
++}
++
++export interface StageMetric {
++  key: 'distanceNm' | 'crewMorale' | 'bountyPool' | 'marineThreat'
++  label: string
++  value: number
++  unit: string
++}
++
++export interface SagaStage {
++  id: string
++  order: number
++  slug: string
++  title: string
++  narrative: string[]
++  island: { id: string; name: string; x: number; y: number }
++  palette: Palette
++  metrics: StageMetric[]
++}
++
++export interface SagaStory {
++  saga: SagaSummary & { intro: string }
++  map: { width: number; height: number }
++  stages: SagaStage[]
++}
++
++export interface ApiErrorBody {
++  status: number
++  code: string
++  message: string
++  traceId?: string
++  details?: { field: string; message: string }[]
++  retryAfterSeconds?: number
++  current?: NewsDetail
++}
++
++// Helper para validar valores que vienen de la URL contra una lista cerrada.
++export function pickEnum<T extends string | number>(list: readonly T[], value: unknown): T | undefined {
++  return list.find((item) => String(item) === String(value))
++}
+diff --git a/src/auth/AuthContext.tsx b/src/auth/AuthContext.tsx
+new file mode 100644
+index 0000000..82542d8
+--- /dev/null
++++ b/src/auth/AuthContext.tsx
+@@ -0,0 +1,94 @@
++import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
++import { api, ApiError, getToken, onUnauthorized, setToken } from '../api/client'
++import type { LoginResponse, MeResponse, Team, User } from '../api/types'
++
++// 'checking': hay token guardado y lo estamos validando con /auth/me (no se muestra el login).
++// 'error': no pudimos verificar la sesión por un problema de red/servidor (se ofrece reintentar).
++export type AuthStatus = 'checking' | 'authenticated' | 'anonymous' | 'error'
++
++interface Session { user: User; team: Team; expiresAt: string }
++
++interface AuthContextValue {
++  status: AuthStatus
++  session: Session | null
++  login: (email: string, password: string) => Promise<void>
++  register: (teamName: string, email: string, password: string) => Promise<void>
++  logout: () => void
++  retryCheck: () => void
++}
++
++const AuthContext = createContext<AuthContextValue | null>(null)
++
++export function AuthProvider({ children }: { children: ReactNode }) {
++  const [status, setStatus] = useState<AuthStatus>(() => (getToken() ? 'checking' : 'anonymous'))
++  const [session, setSession] = useState<Session | null>(null)
++  const [checkAttempt, setCheckAttempt] = useState(0)
++
++  const logout = useCallback(() => {
++    setToken(null)
++    setSession(null)
++    setStatus('anonymous')
++  }, [])
++
++  // Cualquier 401 de la API (token vencido o revocado) cierra la sesión.
++  useEffect(() => onUnauthorized(logout), [logout])
++
++  // Restaurar la sesión al recargar: validar el token guardado con /auth/me.
++  useEffect(() => {
++    if (!getToken()) return
++    const controller = new AbortController()
++    setStatus('checking')
++    api<MeResponse>('/auth/me', { signal: controller.signal })
++      .then((me) => {
++        setSession({ user: me.user, team: me.team, expiresAt: me.expiresAt })
++        setStatus('authenticated')
++      })
++      .catch((error: unknown) => {
++        if (controller.signal.aborted) return
++        if (error instanceof ApiError && error.status === 401) logout()
++        else setStatus('error')
++      })
++    return () => controller.abort()
++  }, [checkAttempt, logout])
++
++  // Si el token vence mientras la app está abierta, volvemos al login sin esperar otra request.
++  useEffect(() => {
++    if (!session) return
++    const msLeft = new Date(session.expiresAt).getTime() - Date.now()
++    if (Number.isNaN(msLeft)) return
++    if (msLeft <= 0) { logout(); return }
++    const timer = window.setTimeout(logout, Math.min(msLeft, 2_147_483_647))
++    return () => window.clearTimeout(timer)
++  }, [session, logout])
++
++  const startSession = useCallback((res: LoginResponse) => {
++    setToken(res.token)
++    setSession({ user: res.user, team: res.team, expiresAt: res.expiresAt })
++    setStatus('authenticated')
++  }, [])
++
++  const login = useCallback(async (email: string, password: string) => {
++    const res = await api<LoginResponse>('/auth/login', { method: 'POST', body: { email: email.trim(), password } })
++    startSession(res)
++  }, [startSession])
++
++  // El registro devuelve la sesión ya iniciada (igual que el login): se entra directo a la app.
++  const register = useCallback(async (teamName: string, email: string, password: string) => {
++    const res = await api<LoginResponse>('/auth/register', { method: 'POST', body: { teamName: teamName.trim(), email: email.trim(), password } })
++    startSession(res)
++  }, [startSession])
++
++  const retryCheck = useCallback(() => setCheckAttempt((n) => n + 1), [])
++
++  const value = useMemo<AuthContextValue>(
++    () => ({ status, session, login, register, logout, retryCheck }),
++    [status, session, login, register, logout, retryCheck],
++  )
++  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
++}
++
++export function useAuth(): AuthContextValue {
++  const ctx = useContext(AuthContext)
++  if (!ctx) throw new Error('useAuth debe usarse dentro de <AuthProvider>')
++  return ctx
++}
+diff --git a/src/auth/guards.tsx b/src/auth/guards.tsx
+new file mode 100644
+index 0000000..2a3c05b
+--- /dev/null
++++ b/src/auth/guards.tsx
+@@ -0,0 +1,52 @@
++import { Navigate, Outlet, useLocation, type Location } from 'react-router-dom'
++import { Compass } from 'lucide-react'
++import { useAuth } from './AuthContext'
++
++export function BootScreen() {
++  const { status, retryCheck, logout } = useAuth()
++  if (status === 'error') {
++    return (
++      <div className="boot-screen" role="alert">
++        <div className="brand-mark"><Compass size={30} /></div>
++        <p>No pudimos verificar tu sesión con el servidor.</p>
++        <div className="boot-actions">
++          <button className="primary-btn" onClick={retryCheck}>Reintentar</button>
++          <button className="secondary-btn" onClick={logout}>Ir al login</button>
++        </div>
++      </div>
++    )
++  }
++  return (
++    <div className="boot-screen" aria-busy="true">
++      <div className="brand-mark"><Compass size={30} /></div>
++      <p>Consultando el Log Pose…</p>
++      <div className="loading-line" />
++    </div>
++  )
++}
++
++interface FromState { from?: Location }
++
++function destinationFrom(state: unknown): string {
++  const from = (state as FromState | null)?.from
++  if (!from || from.pathname === '/login' || from.pathname === '/register') return '/'
++  return `${from.pathname}${from.search}${from.hash}`
++}
++
++// Rutas privadas: sin sesión se va al login, guardando la ubicación completa (path + query + hash).
++export function PrivateRoute() {
++  const { status } = useAuth()
++  const location = useLocation()
++  if (status === 'checking' || status === 'error') return <BootScreen />
++  if (status === 'anonymous') return <Navigate to="/login" replace state={{ from: location }} />
++  return <Outlet />
++}
++
++// Login y registro: si ya hay sesión (o se acaba de iniciar), se vuelve a donde el usuario quería ir.
++export function PublicOnlyRoute() {
++  const { status } = useAuth()
++  const location = useLocation()
++  if (status === 'checking' || status === 'error') return <BootScreen />
++  if (status === 'authenticated') return <Navigate to={destinationFrom(location.state)} replace />
++  return <Outlet />
++}
+diff --git a/src/components/Layout.tsx b/src/components/Layout.tsx
+new file mode 100644
+index 0000000..a9f15ea
+--- /dev/null
++++ b/src/components/Layout.tsx
+@@ -0,0 +1,65 @@
++import { useEffect, useState } from 'react'
++import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
++import { BookOpen, Compass, LogOut, Menu, Newspaper, Skull, Target, X } from 'lucide-react'
++import { useAuth } from '../auth/AuthContext'
++
++function routeLabel(path: string): string {
++  if (path.startsWith('/wanted')) return 'SE BUSCA'
++  if (path.startsWith('/news')) return 'NEWS COO'
++  if (path.startsWith('/sagas')) return 'PONEGLYPH'
++  return 'PUENTE DE MANDO'
++}
++
++export function Layout() {
++  const { session, logout } = useAuth()
++  const navigate = useNavigate()
++  const location = useLocation()
++  const [mobileNav, setMobileNav] = useState(false)
++
++  // Cerrar el menú móvil al cambiar de ruta.
++  useEffect(() => { setMobileNav(false) }, [location.pathname])
++
++  function handleLogout() {
++    logout()
++    navigate('/login', { replace: true })
++  }
++
++  return (
++    <div className="app-shell">
++      <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`} aria-label="Navegación principal">
++        <Link to="/" className="brand">
++          <span className="brand-mark"><Compass size={25} /></span>
++          <span><strong>LOG POSE</strong><small>BOUNTY GUILD</small></span>
++        </Link>
++        <div className="crew-chip">
++          <span className="crew-avatar"><Skull size={20} /></span>
++          <span><b>{session?.team.name ?? 'Tripulación'}</b><small>{session?.team.code ?? ''}</small></span>
++          <span className="online-dot" />
++        </div>
++        <p className="nav-label">TU RUTA</p>
++        <nav className="main-nav">
++          <NavLink to="/" end><Compass size={18} /> Puente de mando</NavLink>
++          <NavLink to="/wanted"><Target size={18} /> Se busca</NavLink>
++          <NavLink to="/news"><Newspaper size={18} /> News Coo</NavLink>
++          <NavLink to="/sagas"><BookOpen size={18} /> Poneglyph</NavLink>
++        </nav>
++        <div className="sidebar-bottom">
++          <button className="logout-btn" onClick={handleLogout}><LogOut size={16} /> Cerrar sesión</button>
++        </div>
++      </aside>
++      {mobileNav && <button className="sidebar-backdrop" aria-label="Cerrar menú" onClick={() => setMobileNav(false)} />}
++      <main className="main-area">
++        <header className="topbar">
++          <button className="mobile-menu icon-button" onClick={() => setMobileNav((v) => !v)} aria-label={mobileNav ? 'Cerrar menú' : 'Abrir menú'} aria-expanded={mobileNav}>
++            {mobileNav ? <X size={20} /> : <Menu size={20} />}
++          </button>
++          <div className="breadcrumb"><span>GRAND LINE</span><span className="crumb-slash">/</span><b>{routeLabel(location.pathname)}</b></div>
++          <div className="top-actions">
++            <div className="top-avatar" title={session?.user.email}>{(session?.team.name ?? 'P').slice(0, 1).toUpperCase()}</div>
++          </div>
++        </header>
++        <Outlet />
++      </main>
++    </div>
++  )
++}
+diff --git a/src/components/ui.tsx b/src/components/ui.tsx
+new file mode 100644
+index 0000000..6a41427
+--- /dev/null
++++ b/src/components/ui.tsx
+@@ -0,0 +1,76 @@
++import type { ReactNode } from 'react'
++import { Link } from 'react-router-dom'
++import { Anchor, ArrowRight, Lock, Search, X } from 'lucide-react'
++import { ApiError, errorMessage } from '../api/client'
++
++export function PageHeading({ eyebrow, title, highlight, description, action }: {
++  eyebrow: string
++  title: string
++  highlight?: string
++  description: string
++  action?: ReactNode
++}) {
++  return (
++    <div className="page-heading">
++      <div>
++        <div className="section-kicker"><span className="kicker-line" />{eyebrow}</div>
++        <h1>{title} {highlight && <em>{highlight}</em>}</h1>
++        <p>{description}</p>
++      </div>
++      {action && <div className="heading-action">{action}</div>}
++    </div>
++  )
++}
++
++export function LoadingState({ text = 'Consultando el registro de la Guild…' }: { text?: string }) {
++  return <div className="loading-state" role="status"><span className="spinner dark-spinner" /><span>{text}</span></div>
++}
++
++export function ErrorState({ error, onRetry, title = 'Perdimos la señal' }: { error: unknown; onRetry: () => void; title?: string }) {
++  return (
++    <div className="state-panel error-state" role="alert">
++      <div className="state-icon"><X size={22} /></div>
++      <h3>{title}</h3>
++      <p>{errorMessage(error)}</p>
++      <button className="secondary-btn" onClick={onRetry}>Reintentar <ArrowRight size={15} /></button>
++    </div>
++  )
++}
++
++export function EmptyState({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
++  return (
++    <div className="state-panel">
++      <div className="state-icon"><Search size={22} /></div>
++      <h3>{title}</h3>
++      <p>{detail}</p>
++      {action}
++    </div>
++  )
++}
++
++// El backend responde 423 LOG_POSE_REQUIRED en el Grand Line hasta aprobar el CP3.
++export function isLogPoseRequired(error: unknown): boolean {
++  return error instanceof ApiError && (error.status === 423 || error.code === 'LOG_POSE_REQUIRED')
++}
++
++export function LogPoseRequired() {
++  return (
++    <div className="state-panel logpose-required">
++      <div className="state-icon"><Lock size={22} /></div>
++      <h3>Necesitas el Log Pose</h3>
++      <p>El Grand Line sigue bloqueado para tu tripulación. Aprueben la inspección de Reverse Mountain (CP3) para desbloquear esta sección.</p>
++      <Link className="secondary-btn" to="/"><Anchor size={15} /> Ver estado del Log Pose</Link>
++    </div>
++  )
++}
++
++export function NotFoundState({ title, detail, backTo, backLabel }: { title: string; detail: string; backTo: string; backLabel: string }) {
++  return (
++    <div className="state-panel">
++      <div className="state-icon"><Search size={22} /></div>
++      <h3>{title}</h3>
++      <p>{detail}</p>
++      <Link className="secondary-btn" to={backTo}>{backLabel} <ArrowRight size={15} /></Link>
++    </div>
++  )
++}
+diff --git a/src/extra.css b/src/extra.css
+new file mode 100644
+index 0000000..376bf4e
+--- /dev/null
++++ b/src/extra.css
+@@ -0,0 +1,170 @@
++/* ===== Utilidades comunes ===== */
++.boot-screen{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--muted);font-size:12px;text-align:center;padding:24px}
++.boot-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
++.field-error{color:#e5a391;font-size:10px;line-height:1.5}
++.text-link{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font:10px var(--mono);letter-spacing:1px}
++.inline-retry{background:none;border:0;padding:4px 0 0;color:#e5a391;font-size:10px;text-align:left;cursor:pointer;text-decoration:underline}
++.sidebar-backdrop{display:none}
++@media(max-width:900px){.sidebar-backdrop{display:block;position:fixed;inset:0;z-index:15;background:#0008;border:0}}
++
++/* Skeletons: misma altura que el contenido real para no mover el layout */
++.skeleton-block,.skeleton-card{position:relative;overflow:hidden;background:#1a221c;border:1px solid #273128;border-radius:8px}
++.skeleton-card{height:318px}
++.skeleton-block::after,.skeleton-card::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,#ffffff0d,transparent);transform:translateX(-100%);animation:skeleton 1.4s infinite}
++@keyframes skeleton{to{transform:translateX(100%)}}
++
++/* ===== Dashboard ===== */
++.fruit-breakdown{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
++.fruit-chip{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #2f3a30;border-radius:999px;background:#171f19;font-size:11px;color:#b9c1b5}
++.fruit-chip b{color:var(--accent);font-family:var(--mono)}
++.fruit-chip:hover{border-color:#6d7556}
++.top-bounties{list-style:none;margin:0;padding:0;border:1px solid #2b362d;border-radius:8px;overflow:hidden}
++.top-bounties li+li{border-top:1px solid #253027}
++.top-bounties a{display:grid;grid-template-columns:42px minmax(0,1fr) auto;align-items:center;gap:12px;padding:13px 16px;background:#171f19;transition:background .15s}
++.top-bounties a:hover{background:#1d271f}
++.top-rank{font:12px var(--mono);color:var(--accent)}
++.top-name{min-width:0}
++.top-name b{display:block;font:650 13px var(--display)}
++.top-name small{display:block;color:var(--muted);font-size:10px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
++.top-bounty{font:12px var(--mono);color:#e7dcc0}
++.dashboard-foot{display:flex;align-items:center;gap:6px;color:#6d7a6f;font-size:10px;margin-top:26px}
++
++/* ===== Se Busca ===== */
++.results-area{position:relative;min-height:680px}
++.wanted-grid.is-refreshing{opacity:.55;transition:opacity .2s;pointer-events:none}
++.refresh-indicator{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;background:#1f2a21;border:1px solid #3b473b;font-size:10px;color:#cfd6c8;z-index:2}
++.threat{letter-spacing:2px;color:#e0a15a;font-size:9px}
++.threat-off{color:#ffffff30}
++.wanted-epithet{min-height:14px}
++.wanted-card-info h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
++.wanted-card-meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px}
++.bounty-history{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
++.bounty-history li{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:10px;align-items:center;font-size:10px;color:var(--muted)}
++.bounty-history b{font:11px var(--mono);color:#e7dcc0}
++.bounty-bar{height:6px;border-radius:99px;background:#232c24;overflow:hidden}
++.bounty-bar span{display:block;height:100%;background:var(--accent);border-radius:99px}
++.detail-row dd a{color:var(--accent);text-decoration:underline}
++@media(max-width:640px){.bounty-history li{grid-template-columns:1fr auto}.bounty-bar{display:none}.results-area{min-height:520px}}
++
++/* ===== News ===== */
++.news-article-body p{margin:0 0 14px}
++.related-wanted{font-size:11px;color:var(--muted)}
++.related-wanted a{color:var(--accent);text-decoration:underline}
++.error-box .secondary-btn{margin-left:auto;flex-shrink:0}
++.logpose-required .secondary-btn{display:inline-flex}
++
++/* ===== Sagas: listado ===== */
++.saga-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
++.saga-tile{display:flex;flex-direction:column;gap:8px;padding:22px;border-radius:12px;background:var(--saga-bg,#19241c);color:var(--saga-text,#e7e9df);border:1px solid color-mix(in srgb,var(--saga-primary,#d7b36c) 35%,transparent);transition:transform .2s,border-color .2s}
++.saga-tile:hover{transform:translateY(-3px);border-color:var(--saga-primary,#d7b36c)}
++.saga-tile-order{font:10px var(--mono);letter-spacing:1.5px;color:var(--saga-primary,#d7b36c)}
++.saga-tile h2{font:750 24px/1.15 var(--display);letter-spacing:-.6px;margin:2px 0}
++.saga-tile-subtitle{margin:0;font-size:12px;opacity:.85}
++.saga-tile-synopsis{margin:4px 0 0;font-size:12px;line-height:1.7;opacity:.75;flex:1}
++.saga-tile-meta{display:flex;flex-wrap:wrap;gap:6px 14px;font:10px var(--mono);opacity:.8}
++.saga-tile-meta span{display:inline-flex;align-items:center;gap:5px}
++.saga-tile-cta{display:inline-flex;align-items:center;gap:6px;margin-top:6px;font:10px var(--mono);letter-spacing:1px;color:var(--saga-accent,#d7b36c)}
++
++/* View Transitions: el título de la saga "viaja" del listado a la historia */
++.vt-title{view-transition-name:var(--vt-name,none)}
++::view-transition-old(root),::view-transition-new(root){animation-duration:.35s}
++
++/* ===== Sagas: historia (scrollytelling) ===== */
++.sg-page{min-height:calc(100vh - 65px)}
++.sg-root{
++  --sg-bg:#111713;--sg-surface:#19241c;--sg-primary:#d7b36c;--sg-accent:#d7b36c;--sg-text:#e7e9df;
++  background:var(--sg-bg);color:var(--sg-text);min-height:100vh;
++  transition:background-color .6s ease,color .6s ease;
++}
++.sg-progress{position:sticky;top:0;z-index:12;height:4px;background:color-mix(in srgb,var(--sg-text) 12%,transparent)}
++.sg-progress-fill{height:100%;background:var(--sg-primary);transform-origin:0 50%;transform:scaleX(var(--scroll-progress,0));transition:background-color .6s}
++/* Scroll-driven Animations cuando el navegador las soporta: la barra avanza con el scroll, sin JS */
++@supports (animation-timeline: scroll()){
++  .sg-progress-fill{transform:none;animation:sg-progress linear both;animation-timeline:scroll(root block)}
++  @keyframes sg-progress{from{transform:scaleX(0)}to{transform:scaleX(1)}}
++}
++
++.sg-header{max-width:900px;margin:0 auto;padding:40px 38px 30px}
++.sg-back{display:inline-flex;align-items:center;gap:8px;background:none;border:1px solid color-mix(in srgb,var(--sg-text) 25%,transparent);color:inherit;border-radius:6px;padding:8px 12px;font-size:11px;cursor:pointer}
++.sg-kicker{display:block;margin-top:26px;font:10px var(--mono);letter-spacing:1.5px;color:var(--sg-primary)}
++.sg-title{font:780 clamp(32px,5vw,58px)/1.05 var(--display);letter-spacing:-1.8px;margin:12px 0 8px}
++.sg-subtitle{font-size:15px;opacity:.85;margin:0 0 16px}
++.sg-intro{font-size:15px;line-height:1.8;opacity:.8;margin:0 0 18px}
++.sg-hint{font-size:11px;opacity:.6;margin:0}
++.sg-hint kbd{font:10px var(--mono);padding:1px 5px;border:1px solid color-mix(in srgb,var(--sg-text) 30%,transparent);border-radius:4px}
++
++.sg-body{display:grid;grid-template-columns:minmax(320px,1fr) minmax(0,1.05fr);gap:40px;max-width:1360px;margin:0 auto;padding:0 38px}
++.sg-panel{position:sticky;top:24px;align-self:start;display:flex;flex-direction:column;gap:14px;padding:16px;border-radius:12px;background:var(--sg-surface);border:1px solid color-mix(in srgb,var(--sg-text) 14%,transparent);transition:background-color .6s}
++.sg-map{width:100%;height:auto;display:block;border-radius:8px;overflow:hidden}
++.sg-map-sea{fill:color-mix(in srgb,var(--sg-bg) 75%,#0b2a3a)}
++.sg-map-grid{stroke:color-mix(in srgb,var(--sg-text) 10%,transparent);stroke-width:1}
++.sg-route-base{fill:none;stroke:color-mix(in srgb,var(--sg-text) 30%,transparent);stroke-dasharray:6 8;stroke-linecap:round;stroke-linejoin:round}
++.sg-route-traveled{fill:none;stroke:var(--sg-primary);stroke-linecap:round;stroke-linejoin:round;transition:stroke-dashoffset .7s ease,stroke .6s}
++.sg-island circle{fill:color-mix(in srgb,var(--sg-text) 45%,transparent);transition:r .4s,fill .4s}
++.sg-island text{fill:color-mix(in srgb,var(--sg-text) 70%,transparent);font-family:var(--mono)}
++.sg-island.is-visited circle{fill:var(--sg-primary)}
++.sg-island.is-active circle{fill:var(--sg-accent);stroke:var(--sg-text);stroke-width:2}
++.sg-island.is-active text{fill:var(--sg-text);font-weight:700}
++.sg-ship{color:var(--sg-text);transition:transform .7s ease}
++.sg-panel-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
++.sg-step{font:11px var(--mono);opacity:.85}
++.sg-step b{color:var(--sg-primary)}
++.sg-step-buttons{display:flex;gap:6px}
++.sg-step-buttons button{width:32px;height:32px;display:grid;place-items:center;border-radius:6px;background:none;border:1px solid color-mix(in srgb,var(--sg-text) 25%,transparent);color:inherit;cursor:pointer}
++.sg-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
++.sg-metric{padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--sg-bg) 55%,transparent)}
++.sg-metric dt{font:9px var(--mono);letter-spacing:1px;text-transform:uppercase;opacity:.7}
++.sg-metric dd{margin:4px 0 0;font:700 18px var(--display);color:var(--sg-primary)}
++.sg-metric small{font:10px var(--mono);opacity:.75;color:var(--sg-text)}
++.sg-stage-nav{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:200px;overflow:auto}
++.sg-stage-nav button{width:100%;display:flex;gap:10px;align-items:center;text-align:left;background:none;border:0;color:inherit;opacity:.65;padding:6px 8px;border-radius:6px;font-size:11px;cursor:pointer}
++.sg-stage-nav button span{font:10px var(--mono);color:var(--sg-primary)}
++.sg-stage-nav button.is-visited{opacity:.8}
++.sg-stage-nav button[aria-current=step]{opacity:1;background:color-mix(in srgb,var(--sg-primary) 18%,transparent);font-weight:700}
++
++.sg-stages{list-style:none;margin:0;padding:0 0 45vh}
++.sg-stage{min-height:62vh;padding:28px 0;scroll-margin-top:22vh;outline:none;border-radius:10px}
++.sg-stage:focus-visible{outline:2px solid var(--sg-primary);outline-offset:6px}
++.sg-stage-inner{padding:24px 26px;border-radius:12px;border:1px solid transparent;transition:border-color .4s,background-color .4s,opacity .5s,transform .5s}
++.sg-stage.is-active .sg-stage-inner{background:color-mix(in srgb,var(--sg-surface) 85%,transparent);border-color:color-mix(in srgb,var(--stage-primary) 45%,transparent)}
++.sg-stage-order{font:10px var(--mono);letter-spacing:1.5px;color:var(--stage-accent,var(--sg-primary))}
++.sg-stage h2{font:750 clamp(24px,3vw,34px)/1.15 var(--display);letter-spacing:-.8px;margin:10px 0 14px}
++.sg-stage p{font-size:15px;line-height:1.85;margin:0 0 14px;opacity:.9}
++
++/* Aparición de cada etapa: Scroll-driven (view timeline) si existe; si no, clase .is-revealed desde JS */
++@media (prefers-reduced-motion: no-preference){
++  .sg-stage:not(.is-revealed) .sg-stage-inner{opacity:0;transform:translateY(24px)}
++  @supports (animation-timeline: view()){
++    .sg-stage .sg-stage-inner,.sg-stage:not(.is-revealed) .sg-stage-inner{opacity:1;transform:none;animation:sg-reveal linear both;animation-timeline:view();animation-range:entry 0% cover 25%}
++    @keyframes sg-reveal{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
++  }
++}
++
++.sg-end{max-width:700px;margin:0 auto;padding:60px 38px 90px;text-align:center}
++.sg-end svg{color:var(--sg-primary)}
++.sg-end h2{font:750 28px var(--display);margin:12px 0 8px}
++.sg-end p{opacity:.8;font-size:13px;margin:0 0 20px}
++
++/* Mobile: mismo comportamiento; el mapa y las métricas quedan fijos arriba (compactos) */
++@media(max-width:900px){
++  .sg-header{padding:24px 16px 20px}
++  .sg-body{grid-template-columns:1fr;gap:0;padding:0 12px}
++  .sg-panel{top:4px;z-index:5;gap:8px;padding:10px}
++  .sg-map{max-height:22vh}
++  .sg-metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
++  .sg-metric{padding:6px}
++  .sg-metric dt{font-size:7px;letter-spacing:.3px}
++  .sg-metric dd{font-size:12px}
++  .sg-stage-nav{display:none}
++  .sg-stage{min-height:55vh;scroll-margin-top:46vh}
++  .sg-stage-inner{padding:18px 14px}
++  .sg-stage p{font-size:14px}
++}
++
++/* Reduced motion: sin animaciones ni transiciones, toda la historia visible y legible */
++@media (prefers-reduced-motion: reduce){
++  .sg-root,.sg-progress-fill,.sg-route-traveled,.sg-ship,.sg-island circle,.sg-stage-inner,.saga-tile,.wanted-card{transition:none!important;animation:none!important}
++  .sg-stage .sg-stage-inner{opacity:1!important;transform:none!important}
++  .sg-progress-fill{transform:scaleX(var(--scroll-progress,0))}
++  ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
++}
+diff --git a/src/lib/format.ts b/src/lib/format.ts
+new file mode 100644
+index 0000000..02a95ea
+--- /dev/null
++++ b/src/lib/format.ts
+@@ -0,0 +1,68 @@
++import type { CrewRole, FruitFilter, NewsPriority, NewsStatus, NewsType, WantedStatus } from '../api/types'
++
++export function berries(value: number): string {
++  return `฿ ${value.toLocaleString('es-PE')}`
++}
++
++export function compactBerries(value: number): string {
++  return `฿ ${new Intl.NumberFormat('es-PE', { notation: 'compact', maximumFractionDigits: 1 }).format(value)}`
++}
++
++export function dateTime(iso: string | null | undefined): string {
++  if (!iso) return '—'
++  const date = new Date(iso)
++  if (Number.isNaN(date.getTime())) return '—'
++  return date.toLocaleString('es-PE', { dateStyle: 'medium', timeStyle: 'short' })
++}
++
++export const WANTED_STATUS_LABEL: Record<WantedStatus, string> = {
++  AT_LARGE: 'Prófugo',
++  CAPTURED: 'Capturado',
++  MISSING: 'Desaparecido',
++}
++
++export const FRUIT_LABEL: Record<FruitFilter, string> = {
++  PARAMECIA: 'Paramecia',
++  ZOAN: 'Zoan',
++  LOGIA: 'Logia',
++  NONE: 'Sin fruta',
++}
++
++export const ROLE_LABEL: Record<CrewRole, string> = {
++  CAPTAIN: 'Capitán',
++  FIRST_MATE: 'Primer oficial',
++  NAVIGATOR: 'Navegante',
++  SNIPER: 'Francotirador',
++  COOK: 'Cocinero',
++  DOCTOR: 'Médico',
++  SHIPWRIGHT: 'Carpintero',
++  MUSICIAN: 'Músico',
++  ARCHAEOLOGIST: 'Arqueólogo',
++  HELMSMAN: 'Timonel',
++  FIGHTER: 'Combatiente',
++}
++
++export const NEWS_TYPE_LABEL: Record<NewsType, string> = {
++  BOUNTY_UPDATE: 'Recompensas',
++  BATTLE: 'Batalla',
++  MARINE_OPERATION: 'Operación Marine',
++  WORLD_GOVERNMENT: 'Gobierno Mundial',
++  DISCOVERY: 'Descubrimiento',
++}
++
++export const NEWS_PRIORITY_LABEL: Record<NewsPriority, string> = {
++  LOW: 'Baja',
++  MEDIUM: 'Media',
++  HIGH: 'Alta',
++  CRITICAL: 'Crítica',
++}
++
++export const NEWS_STATUS_LABEL: Record<NewsStatus, string> = {
++  RUMOR: 'Rumor',
++  CONFIRMED: 'Confirmada',
++  DEBUNKED: 'Desmentida',
++}
++
++export function prefersReducedMotion(): boolean {
++  return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
++}
+diff --git a/src/lib/useResource.ts b/src/lib/useResource.ts
+new file mode 100644
+index 0000000..7ee3cf3
+--- /dev/null
++++ b/src/lib/useResource.ts
+@@ -0,0 +1,33 @@
++import { useCallback, useEffect, useState } from 'react'
++import { api } from '../api/client'
++
++export type ResourceState<T> =
++  | { status: 'loading' }
++  | { status: 'error'; error: unknown }
++  | { status: 'success'; data: T }
++
++// Carga un recurso con loading / error / reintento.
++// Cada cambio de `path` (o reintento) cancela la request anterior con AbortController,
++// así una respuesta vieja nunca pisa a la nueva.
++export function useResource<T>(path: string) {
++  const [state, setState] = useState<{ key: string; value: ResourceState<T> }>({ key: path, value: { status: 'loading' } })
++  const [attempt, setAttempt] = useState(0)
++
++  useEffect(() => {
++    const controller = new AbortController()
++    setState({ key: path, value: { status: 'loading' } })
++    api<T>(path, { signal: controller.signal })
++      .then((data) => setState({ key: path, value: { status: 'success', data } }))
++      .catch((error: unknown) => {
++        if (!controller.signal.aborted) setState({ key: path, value: { status: 'error', error } })
++      })
++    return () => controller.abort()
++  }, [path, attempt])
++
++  const retry = useCallback(() => setAttempt((n) => n + 1), [])
++  const setData = useCallback((data: T) => setState({ key: path, value: { status: 'success', data } }), [path])
++
++  // Si el path cambió y el efecto aún no corre, mostramos loading (nunca datos de otro recurso).
++  const value: ResourceState<T> = state.key === path ? state.value : { status: 'loading' }
++  return { state: value, retry, setData }
++}
+diff --git a/src/lib/viewTransition.ts b/src/lib/viewTransition.ts
+new file mode 100644
+index 0000000..17639d5
+--- /dev/null
++++ b/src/lib/viewTransition.ts
+@@ -0,0 +1,16 @@
++import { flushSync } from 'react-dom'
++import { prefersReducedMotion } from './format'
++
++// Usa la View Transition API cuando existe (y el usuario no pidió menos movimiento).
++// Si no existe, simplemente navega: comportamiento normal.
++export function withViewTransition(update: () => void): void {
++  if (typeof document.startViewTransition !== 'function' || prefersReducedMotion()) {
++    update()
++    return
++  }
++  // flushSync obliga a React a pintar la nueva ruta dentro del callback,
++  // así el navegador puede capturar el "antes" y el "después".
++  document.startViewTransition(() => {
++    flushSync(update)
++  })
++}
+diff --git a/src/main.tsx b/src/main.tsx
+new file mode 100644
+index 0000000..623605f
+--- /dev/null
++++ b/src/main.tsx
+@@ -0,0 +1,20 @@
++import { StrictMode } from 'react'
++import { createRoot } from 'react-dom/client'
++import { BrowserRouter } from 'react-router-dom'
++import App from './App'
++import { AuthProvider } from './auth/AuthContext'
++import './styles.css'
++import './extra.css'
++
++const root = document.getElementById('root')
++if (!root) throw new Error('No se encontró #root')
++
++createRoot(root).render(
++  <StrictMode>
++    <BrowserRouter>
++      <AuthProvider>
++        <App />
++      </AuthProvider>
++    </BrowserRouter>
++  </StrictMode>,
++)
+diff --git a/src/pages/AuthPage.tsx b/src/pages/AuthPage.tsx
+new file mode 100644
+index 0000000..876eaef
+--- /dev/null
++++ b/src/pages/AuthPage.tsx
+@@ -0,0 +1,145 @@
++import { useState, type FormEvent } from 'react'
++import { Link, useLocation } from 'react-router-dom'
++import { ArrowRight, Compass, Ship, X } from 'lucide-react'
++import { ApiError, errorMessage } from '../api/client'
++import { useAuth } from '../auth/AuthContext'
++
++type Field = 'teamName' | 'email' | 'password'
++type FieldErrors = Partial<Record<Field, string>>
++
++// Traduce el error del servidor a errores por campo (para mostrarlos junto al input que corresponde).
++function toFieldErrors(error: ApiError): { fields: FieldErrors; general: string } {
++  const fields: FieldErrors = {}
++  if (error.code === 'EMAIL_ALREADY_REGISTERED') fields.email = error.message
++  if (error.code === 'TEAM_NAME_TAKEN') fields.teamName = error.message
++  for (const detail of error.details) {
++    const key = detail.field.split('.').pop()
++    if (key === 'teamName' || key === 'email' || key === 'password') fields[key] = detail.message
++  }
++  const general = Object.keys(fields).length > 0 ? '' : error.message
++  return { fields, general }
++}
++
++export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
++  const isRegister = mode === 'register'
++  const { login, register } = useAuth()
++  const location = useLocation()
++  const [teamName, setTeamName] = useState('')
++  const [email, setEmail] = useState('')
++  const [password, setPassword] = useState('')
++  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
++  const [generalError, setGeneralError] = useState('')
++  const [busy, setBusy] = useState(false)
++
++  async function submit(event: FormEvent<HTMLFormElement>) {
++    event.preventDefault()
++    if (busy) return
++    setBusy(true)
++    setFieldErrors({})
++    setGeneralError('')
++    try {
++      if (isRegister) await register(teamName, email, password)
++      else await login(email, password)
++      // No navegamos aquí: al quedar autenticados, PublicOnlyRoute redirige a la ruta guardada en `from`.
++    } catch (error) {
++      if (error instanceof ApiError) {
++        const { fields, general } = toFieldErrors(error)
++        setFieldErrors(fields)
++        setGeneralError(general)
++      } else {
++        setGeneralError(errorMessage(error))
++      }
++      setBusy(false)
++    }
++  }
++
++  function clearField(field: Field) {
++    if (fieldErrors[field]) setFieldErrors((prev) => ({ ...prev, [field]: undefined }))
++  }
++
++  return (
++    <div className="auth-layout">
++      <div className="auth-art" aria-hidden="true">
++        <div className="auth-art-grid" />
++        <div className="auth-topline"><span><Compass size={18} /> LOG POSE CONSOLE</span><span>EST. GRAND LINE</span></div>
++        <div className="auth-illustration">
++          <div className="sun-disc" /><div className="sea-ring ring-one" /><div className="sea-ring ring-two" />
++          <div className="auth-compass"><Compass size={116} strokeWidth={0.8} /></div>
++          <div className="island island-one" /><div className="island island-two" />
++          <div className="ship-silhouette"><Ship size={100} strokeWidth={1} /></div>
++        </div>
++        <div className="auth-hero-copy">
++          <p className="eyebrow">LA AVENTURA COMIENZA AQUÍ</p>
++          <h1>Tu rumbo.<br /><em>Tu leyenda.</em></h1>
++          <p>El Grand Line no espera a nadie. Registra tu tripulación y reclama tu lugar en el mapa.</p>
++        </div>
++        <div className="auth-foot"><span>01° 52' N — 131° 40' E</span><span>NO MAP. NO MERCY.</span></div>
++      </div>
++      <div className="auth-panel">
++        <div className="auth-mobile-brand"><Compass /> LOG POSE</div>
++        <div className="auth-form-wrap">
++          <div className="section-kicker"><span className="kicker-line" />{isRegister ? 'NUEVA TRIPULACIÓN' : 'IDENTIFICACIÓN DE TRIPULACIÓN'}</div>
++          <h2>{isRegister ? 'Zarpa con nosotros.' : 'Qué bueno verte,'}<br /><span>{isRegister ? 'Crea tu leyenda.' : 'capitán.'}</span></h2>
++          <p className="auth-intro">{isRegister ? 'Registra tu tripulación para desbloquear tu consola de navegación.' : 'Ingresa con el email y la contraseña de tu tripulación.'}</p>
++
++          <form onSubmit={submit} className="auth-form" noValidate>
++            {isRegister && (
++              <label>
++                Nombre de la tripulación
++                <input
++                  value={teamName}
++                  onChange={(e) => { setTeamName(e.target.value); clearField('teamName') }}
++                  placeholder="Ej. Sabuesos de la Marea"
++                  autoComplete="organization"
++                  aria-invalid={Boolean(fieldErrors.teamName)}
++                  aria-describedby={fieldErrors.teamName ? 'err-teamName' : undefined}
++                />
++                {fieldErrors.teamName && <span className="field-error" id="err-teamName">{fieldErrors.teamName}</span>}
++              </label>
++            )}
++            <label>
++              Email de la tripulación
++              <input
++                type="email"
++                value={email}
++                onChange={(e) => { setEmail(e.target.value); clearField('email') }}
++                placeholder="capitan@grandline.com"
++                autoComplete="email"
++                aria-invalid={Boolean(fieldErrors.email)}
++                aria-describedby={fieldErrors.email ? 'err-email' : undefined}
++              />
++              {fieldErrors.email && <span className="field-error" id="err-email">{fieldErrors.email}</span>}
++            </label>
++            <label>
++              Contraseña
++              <input
++                type="password"
++                value={password}
++                onChange={(e) => { setPassword(e.target.value); clearField('password') }}
++                placeholder={isRegister ? '8 a 72 caracteres' : 'Tu contraseña'}
++                autoComplete={isRegister ? 'new-password' : 'current-password'}
++                aria-invalid={Boolean(fieldErrors.password)}
++                aria-describedby={fieldErrors.password ? 'err-password' : undefined}
++              />
++              {fieldErrors.password && <span className="field-error" id="err-password">{fieldErrors.password}</span>}
++            </label>
++
++            {generalError && <div className="error-box" role="alert"><X size={16} /><span>{generalError}</span></div>}
++
++            <button className="primary-btn auth-submit" type="submit" disabled={busy}>
++              {busy
++                ? <><span className="spinner" /> Verificando coordenadas…</>
++                : <>{isRegister ? 'Registrar tripulación' : 'Entrar al Grand Line'} <ArrowRight size={17} /></>}
++            </button>
++          </form>
++
++          <p className="auth-switch">
++            {isRegister ? '¿Ya tienes una tripulación?' : '¿Aún no tienes tripulación?'}{' '}
++            {/* Se pasa el mismo `state` para no perder la ruta a la que se quería volver. */}
++            <Link to={isRegister ? '/login' : '/register'} state={location.state}>{isRegister ? 'Inicia sesión' : 'Registra tu tripulación'}</Link>
++          </p>
++        </div>
++      </div>
++    </div>
++  )
++}
+diff --git a/src/pages/Dashboard.tsx b/src/pages/Dashboard.tsx
+new file mode 100644
+index 0000000..a5253f3
+--- /dev/null
++++ b/src/pages/Dashboard.tsx
+@@ -0,0 +1,154 @@
++import { Link } from 'react-router-dom'
++import { Anchor, ArrowRight, BookOpen, Compass, Flame, Lock, Newspaper, Scale, Target, Users } from 'lucide-react'
++import type { DashboardSummary, LogPose } from '../api/types'
++import { FRUIT_FILTERS, WANTED_STATUSES } from '../api/types'
++import { useAuth } from '../auth/AuthContext'
++import { EmptyState, ErrorState, PageHeading } from '../components/ui'
++import { berries, compactBerries, dateTime, FRUIT_LABEL, WANTED_STATUS_LABEL } from '../lib/format'
++import { useResource } from '../lib/useResource'
++
++function DashboardSkeleton() {
++  return (
++    <div aria-busy="true" aria-label="Cargando indicadores">
++      <div className="stats-grid">
++        {[0, 1, 2].map((i) => <div className="stat-card skeleton-block" key={i} style={{ height: 112 }} />)}
++      </div>
++      <div className="skeleton-block" style={{ height: 120, marginTop: 18, borderRadius: 10 }} />
++      <div className="skeleton-block" style={{ height: 220, marginTop: 18, borderRadius: 10 }} />
++    </div>
++  )
++}
++
++function LogPosePanel({ pose }: { pose: LogPose }) {
++  const unlocked = pose.status === 'UNLOCKED'
++  return (
++    <div className="pose-status-panel">
++      <div className="pose-emblem">{unlocked ? <Compass size={27} /> : <Lock size={24} />}</div>
++      <div className="pose-status-copy">
++        <span className="destination-number">REVERSE MOUNTAIN · CP3</span>
++        <h3>{unlocked ? 'Log Pose sincronizado' : 'Tu Log Pose espera la inspección'}</h3>
++        <p>{pose.message}{unlocked && pose.unlockedAt ? ` · Desde ${dateTime(pose.unlockedAt)}` : ''}</p>
++      </div>
++      <span className={`pose-badge ${unlocked ? 'unlocked' : ''}`}><span /> {unlocked ? 'UNLOCKED' : 'LOCKED'}</span>
++    </div>
++  )
++}
++
++export function Dashboard() {
++  const { session } = useAuth()
++  const summary = useResource<DashboardSummary>('/dashboard/summary')
++  const pose = useResource<LogPose>('/log-pose')
++
++  const retryAll = () => { summary.retry(); pose.retry() }
++  const failed = summary.state.status === 'error' ? summary.state.error : pose.state.status === 'error' ? pose.state.error : null
++  const loading = summary.state.status === 'loading' || pose.state.status === 'loading'
++
++  return (
++    <div className="page-content dashboard-page">
++      <PageHeading
++        eyebrow="EAST BLUE · PUESTO DE MANDO"
++        title="A la orden,"
++        highlight="capitán."
++        description={`${session?.team.name ?? 'Tu tripulación'} · ${session?.team.code ?? ''}. Estos son los indicadores de tu workspace.`}
++      />
++
++      {failed !== null ? (
++        <ErrorState error={failed} onRetry={retryAll} />
++      ) : loading || summary.state.status !== 'success' || pose.state.status !== 'success' ? (
++        <DashboardSkeleton />
++      ) : (
++        <DashboardContent data={summary.state.data} pose={pose.state.data} />
++      )}
++    </div>
++  )
++}
++
++function DashboardContent({ data, pose }: { data: DashboardSummary; pose: LogPose }) {
++  const unlocked = pose.status === 'UNLOCKED'
++  const empty = data.wanted.total === 0
++
++  return (
++    <>
++      <LogPosePanel pose={pose} />
++
++      {empty ? (
++        <div style={{ marginTop: 18 }}>
++          <EmptyState
++            title="Tu workspace aún no tiene carteles"
++            detail="Cuando la Guild registre carteles de 'Se Busca' en tu workspace, aquí verás sus indicadores."
++          />
++        </div>
++      ) : (
++        <>
++          <div className="section-title-row">
++            <div><div className="section-kicker"><span className="kicker-line" /> DATOS DE LA GUILD</div><h2>Estado del archivo</h2></div>
++            <span className="updated-label">CALCULADO {dateTime(data.generatedAt).toUpperCase()}</span>
++          </div>
++          <div className="stats-grid">
++            <article className="stat-card">
++              <div className="stat-card-top"><span>CARTELES</span><span className="stat-icon stat-icon-0"><Target size={18} /></span></div>
++              <div className="stat-value">{data.wanted.total.toLocaleString('es-PE')}</div>
++              <div className="stat-note"><span className="stat-dot" />{WANTED_STATUSES.map((s) => `${WANTED_STATUS_LABEL[s]}: ${data.wanted.byStatus[s]}`).join(' · ')}</div>
++            </article>
++            <article className="stat-card">
++              <div className="stat-card-top"><span>RECOMPENSA TOTAL</span><span className="stat-icon stat-icon-1"><Flame size={18} /></span></div>
++              <div className="stat-value" title={berries(data.wanted.totalBounty)}>{compactBerries(data.wanted.totalBounty)}</div>
++              <div className="stat-note"><span className="stat-dot" /><Scale size={12} /> Promedio {compactBerries(data.wanted.averageBounty)}</div>
++            </article>
++            <article className="stat-card">
++              <div className="stat-card-top"><span>TRIPULACIONES</span><span className="stat-icon stat-icon-2"><Users size={18} /></span></div>
++              <div className="stat-value">{data.crews.total.toLocaleString('es-PE')}</div>
++              <div className="stat-note"><span className="stat-dot" />{data.crews.mostWanted ? `Más buscada: ${data.crews.mostWanted.name}` : 'Sin tripulación destacada'}</div>
++            </article>
++          </div>
++
++          <div className="fruit-breakdown">
++            {FRUIT_FILTERS.map((f) => (
++              <Link key={f} to={`/wanted?fruit=${f}`} className="fruit-chip">
++                <span>{FRUIT_LABEL[f]}</span><b>{data.wanted.byFruit[f]}</b>
++              </Link>
++            ))}
++          </div>
++
++          <div className="section-title-row lower-title">
++            <div><div className="section-kicker"><span className="kicker-line" /> TOP RECOMPENSAS</div><h2>Los más buscados</h2></div>
++            <Link to="/wanted" className="text-link">Ver todos <ArrowRight size={14} /></Link>
++          </div>
++          <ol className="top-bounties">
++            {data.topBounties.map((w, i) => (
++              <li key={w.id}>
++                <Link to={`/wanted/${encodeURIComponent(w.id)}`}>
++                  <span className="top-rank">{String(i + 1).padStart(2, '0')}</span>
++                  <span className="top-name"><b>{w.name}</b><small>“{w.epithet}” · {w.crew.name}</small></span>
++                  <span className="top-bounty">{berries(w.bounty)}</span>
++                </Link>
++              </li>
++            ))}
++          </ol>
++        </>
++      )}
++
++      <div className="section-title-row lower-title">
++        <div><div className="section-kicker"><span className="kicker-line" /> PRÓXIMOS DESTINOS</div><h2>Tu ruta de navegación</h2></div>
++      </div>
++      <div className="destination-grid">
++        <Link to="/wanted" className="destination-card wanted-destination">
++          <div className="destination-icon"><Target size={21} /></div>
++          <div><span className="destination-number">01 / EAST BLUE</span><h3>Carteles de Se Busca</h3><p>Rastrea objetivos, filtra recompensas y revisa sus expedientes.</p></div>
++          <ArrowRight className="destination-arrow" size={18} />
++        </Link>
++        <Link to="/news" className={`destination-card ${unlocked ? 'news-destination' : 'locked-destination'}`}>
++          <div className="destination-icon">{unlocked ? <Newspaper size={21} /> : <Lock size={21} />}</div>
++          <div><span className="destination-number">02 / GRAND LINE · {unlocked ? 'ABIERTO' : 'BLOQUEADO'}</span><h3>News Coo</h3><p>{unlocked ? 'Sigue los reportes del mundo y verifica rumores.' : 'Requiere aprobar la inspección de Reverse Mountain.'}</p></div>
++          <ArrowRight className="destination-arrow" size={18} />
++        </Link>
++        <Link to="/sagas" className={`destination-card ${unlocked ? 'saga-destination' : 'locked-destination'}`}>
++          <div className="destination-icon">{unlocked ? <BookOpen size={21} /> : <Lock size={21} />}</div>
++          <div><span className="destination-number">03 / PONEGLYPH · {unlocked ? 'ABIERTO' : 'BLOQUEADO'}</span><h3>La Gran Saga</h3><p>Recorre las islas etapa por etapa.</p></div>
++          <ArrowRight className="destination-arrow" size={18} />
++        </Link>
++      </div>
++      <p className="dashboard-foot"><Anchor size={13} /> Datos en vivo de tu workspace.</p>
++    </>
++  )
++}
+diff --git a/src/pages/news/NewsDetailPage.tsx b/src/pages/news/NewsDetailPage.tsx
+new file mode 100644
+index 0000000..78ce64c
+--- /dev/null
++++ b/src/pages/news/NewsDetailPage.tsx
+@@ -0,0 +1,125 @@
++import { useState } from 'react'
++import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
++import { ArrowLeft, Check, Newspaper, RotateCw, Shield, X } from 'lucide-react'
++import { api, ApiError, errorMessage } from '../../api/client'
++import type { NewsDetail } from '../../api/types'
++import { ErrorState, isLogPoseRequired, LoadingState, LogPoseRequired, NotFoundState } from '../../components/ui'
++import { dateTime, NEWS_PRIORITY_LABEL, NEWS_STATUS_LABEL, NEWS_TYPE_LABEL } from '../../lib/format'
++import { useResource } from '../../lib/useResource'
++import { applyNewsUpdate } from './newsStore'
++
++type Verdict = 'CONFIRMED' | 'DEBUNKED'
++
++export function NewsDetailPage() {
++  const { id = '' } = useParams()
++  const navigate = useNavigate()
++  const location = useLocation()
++  const { state, retry, setData } = useResource<NewsDetail>(`/news/${encodeURIComponent(id)}`)
++
++  const [pending, setPending] = useState<Verdict | null>(null)          // request en vuelo
++  const [failed, setFailed] = useState<{ verdict: Verdict; error: unknown } | null>(null)
++  const [notice, setNotice] = useState('')
++
++  const cameFromFeed = Boolean((location.state as { fromFeed?: boolean } | null)?.fromFeed)
++  function goBack() {
++    // Volver a la misma entrada del historial: el feed se reconstruye desde lo guardado, sin volver a pedirlo.
++    if (cameFromFeed) navigate(-1)
++    else navigate('/news')
++  }
++
++  async function verify(verdict: Verdict) {
++    if (pending) return
++    setPending(verdict)
++    setFailed(null)
++    setNotice('')
++    try {
++      const updated = await api<NewsDetail>(`/news/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: { status: verdict } })
++      setData(updated)
++      applyNewsUpdate(updated) // el feed reflejará el nuevo estado al volver
++      setNotice(verdict === 'CONFIRMED' ? 'Listo: la noticia quedó CONFIRMADA.' : 'Listo: la noticia quedó DESMENTIDA.')
++    } catch (error) {
++      // 409: otra persona ya la verificó con el otro estado → mostramos el estado real que devuelve el servidor.
++      if (error instanceof ApiError && error.code === 'NEWS_ALREADY_VERIFIED' && error.body?.current) {
++        setData(error.body.current)
++        applyNewsUpdate(error.body.current)
++        setNotice(`Esta noticia ya había sido verificada como ${NEWS_STATUS_LABEL[error.body.current.status].toUpperCase()}.`)
++      } else {
++        // El estado anterior se conserva (no tocamos los datos) y se permite reintentar.
++        setFailed({ verdict, error })
++      }
++    } finally {
++      setPending(null)
++    }
++  }
++
++  return (
++    <div className="page-content detail-page">
++      <button className="back-link" onClick={goBack}><ArrowLeft size={16} /> Volver a News Coo</button>
++
++      {state.status === 'loading' && <LoadingState text="Abriendo el reporte…" />}
++      {state.status === 'error' && (
++        isLogPoseRequired(state.error) ? <LogPoseRequired />
++          : state.error instanceof ApiError && state.error.status === 404
++            ? <NotFoundState title="Noticia no encontrada" detail="Esta noticia no existe en tu workspace." backTo="/news" backLabel="Ir al feed" />
++            : <ErrorState error={state.error} onRetry={retry} />
++      )}
++
++      {state.status === 'success' && (() => {
++        const n = state.data
++        return (
++          <article className="news-detail">
++            <div className="section-kicker"><span className="kicker-line" /> NEWS COO · {n.source.toUpperCase()}</div>
++            <div className="news-detail-tags">
++              <span className="news-type">{NEWS_TYPE_LABEL[n.type]}</span>
++              <span className={`news-status status-${n.status.toLowerCase()}`}>{NEWS_STATUS_LABEL[n.status]}</span>
++              <span className="news-date">{dateTime(n.publishedAt)}</span>
++            </div>
++            <h1>{n.title}</h1>
++            <p className="news-detail-lede">{n.summary}</p>
++            <div className="news-detail-byline">
++              <span className="byline-icon"><Newspaper size={17} /></span>
++              <div><b>{n.source}</b><small>{n.island}</small></div>
++              <span className={`priority-label priority-text-${n.priority.toLowerCase()}`}>PRIORIDAD {NEWS_PRIORITY_LABEL[n.priority].toUpperCase()}</span>
++            </div>
++            <div className="news-article-body">{n.body.map((paragraph, i) => <p key={i}>{paragraph}</p>)}</div>
++            {n.relatedWanted && (
++              <p className="related-wanted">Cartel relacionado: <Link to={`/wanted/${encodeURIComponent(n.relatedWanted.id)}`}>{n.relatedWanted.name}</Link></p>
++            )}
++
++            {notice && <div className="success-box" role="status"><Check size={16} /><span>{notice}</span></div>}
++            {failed && (
++              <div className="error-box" role="alert">
++                <X size={16} />
++                <span>No se pudo guardar la verificación: {errorMessage(failed.error)} La noticia sigue como {NEWS_STATUS_LABEL[n.status].toUpperCase()}.</span>
++                <button className="secondary-btn" onClick={() => void verify(failed.verdict)} disabled={pending !== null}><RotateCw size={14} /> Reintentar</button>
++              </div>
++            )}
++
++            {n.status === 'RUMOR' ? (
++              <div className="verify-panel">
++                <div>
++                  <div className="section-kicker"><span className="kicker-line" /> VERIFICACIÓN DE LA GUILD</div>
++                  <h3>¿Este rumor es cierto?</h3>
++                  <p>Solo los rumores se pueden verificar. El cambio es permanente en tu workspace.</p>
++                </div>
++                <div className="verify-actions">
++                  <button className="confirm-btn" disabled={pending !== null} onClick={() => void verify('CONFIRMED')}>
++                    {pending === 'CONFIRMED' ? <span className="spinner" /> : <Check size={16} />} Confirmar
++                  </button>
++                  <button className="debunk-btn" disabled={pending !== null} onClick={() => void verify('DEBUNKED')}>
++                    {pending === 'DEBUNKED' ? <span className="spinner" /> : <X size={16} />} Desmentir
++                  </button>
++                </div>
++              </div>
++            ) : (
++              <div className="verified-panel">
++                <Shield size={19} />
++                <span>Reporte {NEWS_STATUS_LABEL[n.status].toUpperCase()}{n.verifiedAt ? ` el ${dateTime(n.verifiedAt)}` : ''}.</span>
++              </div>
++            )}
++          </article>
++        )
++      })()}
++    </div>
++  )
++}
+diff --git a/src/pages/news/NewsFeedPage.tsx b/src/pages/news/NewsFeedPage.tsx
+new file mode 100644
+index 0000000..90d08c0
+--- /dev/null
++++ b/src/pages/news/NewsFeedPage.tsx
+@@ -0,0 +1,267 @@
++import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
++import { Link, useSearchParams } from 'react-router-dom'
++import { ArrowRight, Globe2, Newspaper, RotateCw } from 'lucide-react'
++import { api, ApiError, errorMessage } from '../../api/client'
++import { NEWS_PRIORITIES, NEWS_STATUSES, NEWS_TYPES, pickEnum } from '../../api/types'
++import type { NewsFeed, NewsItem } from '../../api/types'
++import { EmptyState, ErrorState, isLogPoseRequired, LogPoseRequired, PageHeading } from '../../components/ui'
++import { dateTime, NEWS_PRIORITY_LABEL, NEWS_STATUS_LABEL, NEWS_TYPE_LABEL } from '../../lib/format'
++import { filtersToParams, getFeed, parseNewsFilters, saveFeed, type NewsFilters } from './newsStore'
++
++const PAGE_LIMIT = 20
++
++interface FeedState {
++  key: string            // filtros a los que pertenece este estado
++  items: NewsItem[]
++  nextCursor: string | null
++  hasMore: boolean
++  started: boolean       // ya llegó la primera carga
++  loading: boolean
++  error: unknown | null
++}
++
++function emptyFeed(key: string): FeedState {
++  return { key, items: [], nextCursor: null, hasMore: true, started: false, loading: false, error: null }
++}
++
++function feedFromCache(key: string): FeedState | null {
++  const cached = getFeed(key)
++  if (!cached) return null
++  return { key, items: cached.items, nextCursor: cached.nextCursor, hasMore: cached.hasMore, started: true, loading: false, error: null }
++}
++
++function isCursorError(error: unknown): boolean {
++  return error instanceof ApiError && (error.code === 'INVALID_CURSOR' || error.code === 'CURSOR_FILTER_MISMATCH')
++}
++
++export function NewsFeedPage() {
++  const [params, setParams] = useSearchParams()
++  const filters = useMemo(() => parseNewsFilters(params), [params])
++  const key = filtersToParams(filters).toString()
++
++  // URL con valores inválidos → se normaliza (replace).
++  useEffect(() => {
++    if (params.toString() !== key) setParams(new URLSearchParams(key), { replace: true })
++  }, [params, key, setParams])
++
++  const [state, setState] = useState<FeedState>(() => feedFromCache(key) ?? emptyFeed(key))
++  const stateRef = useRef(state)
++  stateRef.current = state
++
++  const keyRef = useRef(key)            // filtros vigentes
++  const inFlight = useRef(false)        // una sola carga en vuelo
++  const controllerRef = useRef<AbortController | null>(null)
++  const lastScrollY = useRef(0)
++  const pendingScroll = useRef<number | null>(getFeed(key)?.scrollY ?? null)
++
++  const loadPage = useCallback(async (forKey: string, cursor: string | null) => {
++    if (inFlight.current) return
++    inFlight.current = true
++    const controller = new AbortController()
++    controllerRef.current = controller
++    setState((s) => (s.key === forKey ? { ...s, loading: true, error: null } : s))
++    try {
++      const query = new URLSearchParams(forKey)
++      query.set('limit', String(PAGE_LIMIT))
++      if (cursor) query.set('cursor', cursor)
++      const res = await api<NewsFeed>(`/news/feed?${query.toString()}`, { signal: controller.signal })
++      // Si mientras tanto cambiaron los filtros, esta respuesta es de otro feed: se descarta (nunca se mezclan).
++      if (controller.signal.aborted || keyRef.current !== forKey) return
++      setState((s) => {
++        if (s.key !== forKey) return s
++        // Regla de Nami: ninguna noticia aparece dos veces.
++        const seen = new Set(s.items.map((item) => item.id))
++        const fresh: NewsItem[] = []
++        for (const item of res.items) {
++          if (!seen.has(item.id)) { seen.add(item.id); fresh.push(item) }
++        }
++        return {
++          ...s,
++          items: [...s.items, ...fresh],
++          nextCursor: res.nextCursor,
++          hasMore: res.hasMore && res.nextCursor !== null,
++          started: true,
++          loading: false,
++          error: null,
++        }
++      })
++    } catch (error) {
++      if (controller.signal.aborted || keyRef.current !== forKey) return
++      // Un error NO borra lo que ya estaba cargado.
++      setState((s) => (s.key === forKey ? { ...s, loading: false, error } : s))
++    } finally {
++      if (controllerRef.current === controller) {
++        controllerRef.current = null
++        inFlight.current = false
++      }
++    }
++  }, [])
++
++  // Cambio de filtros: se cancela la carga en vuelo y se empieza de cero (o desde lo guardado).
++  useEffect(() => {
++    keyRef.current = key
++    const cached = feedFromCache(key)
++    if (cached) {
++      setState(cached)
++    } else {
++      setState(emptyFeed(key))
++      void loadPage(key, null)
++    }
++    return () => {
++      controllerRef.current?.abort()
++      controllerRef.current = null
++      inFlight.current = false
++    }
++  }, [key, loadPage])
++
++  // Guardar el feed (para volver del detalle sin pedir de nuevo lo que ya teníamos).
++  useEffect(() => {
++    if (state.started && state.items.length > 0) {
++      saveFeed(state.key, { items: state.items, nextCursor: state.nextCursor, hasMore: state.hasMore, scrollY: lastScrollY.current })
++    }
++  }, [state])
++
++  // Registrar la posición de scroll y guardarla al salir.
++  useEffect(() => {
++    let frame = 0
++    const onScroll = () => {
++      cancelAnimationFrame(frame)
++      frame = requestAnimationFrame(() => { lastScrollY.current = window.scrollY })
++    }
++    window.addEventListener('scroll', onScroll, { passive: true })
++    return () => {
++      window.removeEventListener('scroll', onScroll)
++      cancelAnimationFrame(frame)
++      const s = stateRef.current
++      if (s.started && s.items.length > 0) {
++        saveFeed(s.key, { items: s.items, nextCursor: s.nextCursor, hasMore: s.hasMore, scrollY: lastScrollY.current })
++      }
++    }
++  }, [])
++
++  // Al volver del detalle: restaurar la posición exacta.
++  useLayoutEffect(() => {
++    if (pendingScroll.current === null || !state.started) return
++    window.scrollTo(0, pendingScroll.current)
++    lastScrollY.current = pendingScroll.current
++    pendingScroll.current = null
++  }, [state.started])
++
++  // Infinite scroll: un IntersectionObserver vigila un "sentinel" al final de la lista.
++  const sentinelRef = useRef<HTMLDivElement>(null)
++  const loadMore = useCallback(() => {
++    const s = stateRef.current
++    if (!s.started || s.loading || s.error !== null || !s.hasMore || !s.nextCursor) return
++    void loadPage(s.key, s.nextCursor)
++  }, [loadPage])
++
++  useEffect(() => {
++    const node = sentinelRef.current
++    if (!node || !state.started || state.loading || state.error !== null || !state.hasMore) return
++    // Se re-observa tras cada carga: si el sentinel sigue visible (lista corta), se dispara de nuevo.
++    const observer = new IntersectionObserver((entries) => {
++      if (entries.some((entry) => entry.isIntersecting)) loadMore()
++    }, { rootMargin: '600px 0px' })
++    observer.observe(node)
++    return () => observer.disconnect()
++  }, [state.started, state.loading, state.error, state.hasMore, state.items.length, loadMore])
++
++  function retry() {
++    const s = stateRef.current
++    if (!s.started || isCursorError(s.error)) {
++      // Primera carga fallida o cursor inválido: se empieza de cero.
++      setState(emptyFeed(s.key))
++      void loadPage(s.key, null)
++    } else {
++      void loadPage(s.key, s.nextCursor)
++    }
++  }
++
++  function updateFilter(patch: NewsFilters) {
++    setParams(filtersToParams({ ...filters, ...patch }))
++  }
++
++  function rememberScroll() { lastScrollY.current = window.scrollY }
++
++  const view = state.key === key ? state : (feedFromCache(key) ?? emptyFeed(key))
++
++  return (
++    <div className="page-content">
++      <PageHeading
++        eyebrow="GRAND LINE · NEWS COO"
++        title="El mundo"
++        highlight="no se detiene."
++        description="Rumores, reportes y noticias del Grand Line. Verifica los rumores desde el detalle."
++        action={<span className="count-pill"><Globe2 size={15} /> {view.items.length} cargadas</span>}
++      />
++
++      <div className="news-filter-bar">
++        <div className="news-filter-title"><Newspaper size={17} /><span>FILTRO DE TRANSMISIONES</span></div>
++        <label><span>Tipo</span>
++          <select value={filters.type ?? ''} onChange={(e) => updateFilter({ type: pickEnum(NEWS_TYPES, e.target.value) })}>
++            <option value="">Todos</option>
++            {NEWS_TYPES.map((t) => <option key={t} value={t}>{NEWS_TYPE_LABEL[t]}</option>)}
++          </select>
++        </label>
++        <label><span>Prioridad</span>
++          <select value={filters.priority ?? ''} onChange={(e) => updateFilter({ priority: pickEnum(NEWS_PRIORITIES, e.target.value) })}>
++            <option value="">Todas</option>
++            {NEWS_PRIORITIES.map((p) => <option key={p} value={p}>{NEWS_PRIORITY_LABEL[p]}</option>)}
++          </select>
++        </label>
++        <label><span>Estado</span>
++          <select value={filters.status ?? ''} onChange={(e) => updateFilter({ status: pickEnum(NEWS_STATUSES, e.target.value) })}>
++            <option value="">Todos</option>
++            {NEWS_STATUSES.map((s) => <option key={s} value={s}>{NEWS_STATUS_LABEL[s]}</option>)}
++          </select>
++        </label>
++      </div>
++
++      {isLogPoseRequired(view.error) ? (
++        <LogPoseRequired />
++      ) : !view.started && view.error !== null ? (
++        <ErrorState error={view.error} onRetry={retry} />
++      ) : !view.started ? (
++        <div className="news-feed" aria-busy="true">
++          {Array.from({ length: 5 }, (_, i) => <div key={i} className="news-card skeleton-block" style={{ height: 132 }} />)}
++        </div>
++      ) : view.items.length === 0 && !view.hasMore ? (
++        <EmptyState title="Silencio en las ondas" detail="No hay noticias con estos filtros." />
++      ) : (
++        <div className="news-feed">
++          {view.items.map((item) => <NewsCard key={item.id} item={item} onOpen={rememberScroll} />)}
++          <div ref={sentinelRef} className="feed-sentinel" aria-hidden="true" />
++          {view.loading && <div className="feed-loading" role="status"><span className="spinner dark-spinner" /> Recibiendo nuevas transmisiones…</div>}
++          {view.error !== null && (
++            <div className="inline-error" role="alert">
++              <span>{errorMessage(view.error)} Las noticias ya cargadas se conservan.</span>
++              <button className="secondary-btn" onClick={retry}><RotateCw size={14} /> Reintentar</button>
++            </div>
++          )}
++          {!view.hasMore && !view.loading && <div className="feed-end"><span /> FIN DE TRANSMISIÓN · {view.items.length} noticias <span /></div>}
++        </div>
++      )}
++    </div>
++  )
++}
++
++function NewsCard({ item, onOpen }: { item: NewsItem; onOpen: () => void }) {
++  return (
++    <Link to={`/news/${encodeURIComponent(item.id)}`} state={{ fromFeed: true }} className="news-card" onClick={onOpen}>
++      <div className={`news-priority priority-${item.priority.toLowerCase()}`} />
++      <div className="news-card-content">
++        <div className="news-meta">
++          <span className="news-type">{NEWS_TYPE_LABEL[item.type]}</span>
++          <span className={`news-status status-${item.status.toLowerCase()}`}>{NEWS_STATUS_LABEL[item.status]}</span>
++          <span className="news-date">{dateTime(item.publishedAt)}</span>
++        </div>
++        <h3>{item.title}</h3>
++        <p>{item.summary}</p>
++        <div className="news-card-bottom">
++          <span>{item.source} · {item.island} · Prioridad {NEWS_PRIORITY_LABEL[item.priority]}</span>
++          <span className="read-report">LEER REPORTE <ArrowRight size={14} /></span>
++        </div>
++      </div>
++    </Link>
++  )
++}
+diff --git a/src/pages/news/newsStore.ts b/src/pages/news/newsStore.ts
+new file mode 100644
+index 0000000..eeec81c
+--- /dev/null
++++ b/src/pages/news/newsStore.ts
+@@ -0,0 +1,49 @@
++import { NEWS_PRIORITIES, NEWS_STATUSES, NEWS_TYPES, pickEnum } from '../../api/types'
++import type { NewsDetail, NewsItem, NewsPriority, NewsStatus, NewsType } from '../../api/types'
++
++export interface NewsFilters { type?: NewsType; priority?: NewsPriority; status?: NewsStatus }
++
++export function parseNewsFilters(params: URLSearchParams): NewsFilters {
++  return {
++    type: pickEnum(NEWS_TYPES, params.get('type')),
++    priority: pickEnum(NEWS_PRIORITIES, params.get('priority')),
++    status: pickEnum(NEWS_STATUSES, params.get('status')),
++  }
++}
++
++export function filtersToParams(filters: NewsFilters): URLSearchParams {
++  const p = new URLSearchParams()
++  if (filters.type) p.set('type', filters.type)
++  if (filters.priority) p.set('priority', filters.priority)
++  if (filters.status) p.set('status', filters.status)
++  return p
++}
++
++// Estado guardado de cada feed (por combinación de filtros). Permite volver del detalle
++// con las noticias ya cargadas y la misma posición, sin volver a pedir lo que ya se tenía.
++export interface FeedSnapshot {
++  items: NewsItem[]
++  nextCursor: string | null
++  hasMore: boolean
++  scrollY: number
++}
++
++const feeds = new Map<string, FeedSnapshot>()
++
++export function getFeed(key: string): FeedSnapshot | undefined { return feeds.get(key) }
++export function saveFeed(key: string, snapshot: FeedSnapshot): void { feeds.set(key, snapshot) }
++
++// Tras verificar un rumor, se actualiza la noticia en todos los feeds guardados.
++// Si un feed filtra por un estado que la noticia ya no cumple (p. ej. status=RUMOR), se quita de ese feed.
++export function applyNewsUpdate(updated: NewsDetail): void {
++  for (const [key, feed] of feeds) {
++    const statusFilter = new URLSearchParams(key).get('status')
++    const items = feed.items.flatMap((item) => {
++      if (item.id !== updated.id) return [item]
++      if (statusFilter && statusFilter !== updated.status) return []
++      const { body: _body, ...summary } = updated
++      return [{ ...item, ...summary }]
++    })
++    feeds.set(key, { ...feed, items })
++  }
++}
+diff --git a/src/pages/sagas/SagaStory.tsx b/src/pages/sagas/SagaStory.tsx
+new file mode 100644
+index 0000000..b43599c
+--- /dev/null
++++ b/src/pages/sagas/SagaStory.tsx
+@@ -0,0 +1,287 @@
++import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
++import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
++import { ArrowLeft, ArrowRight, Compass, Ship } from 'lucide-react'
++import { ApiError } from '../../api/client'
++import type { SagaStage, SagaStory as SagaStoryData } from '../../api/types'
++import { ErrorState, isLogPoseRequired, LoadingState, LogPoseRequired, NotFoundState } from '../../components/ui'
++import { prefersReducedMotion } from '../../lib/format'
++import { useResource } from '../../lib/useResource'
++import { withViewTransition } from '../../lib/viewTransition'
++import { getSagaSummary, transitionName } from './sagaCache'
++
++// Línea de referencia (fracción del alto de la ventana): la etapa activa es la última
++// cuyo borde superior ya cruzó esta línea. En mobile el mapa ocupa la parte superior,
++// por eso la línea va más abajo. Debe coincidir con el scroll-margin-top del CSS.
++const MOBILE_QUERY = '(max-width: 900px)'
++function anchorRatio(): number {
++  return window.matchMedia(MOBILE_QUERY).matches ? 0.62 : 0.5
++}
++
++const supportsScrollTimeline = typeof CSS !== 'undefined' && CSS.supports('animation-timeline: scroll()')
++
++export function SagaStory() {
++  const { id = '' } = useParams()
++  const navigate = useNavigate()
++  const { state, retry } = useResource<SagaStoryData>(`/sagas/${encodeURIComponent(id)}/story`)
++  const summary = getSagaSummary(id)
++
++  function backToList() {
++    withViewTransition(() => navigate('/sagas'))
++  }
++
++  return (
++    <div className="sg-page">
++      {state.status !== 'success' && (
++        <div className="page-content">
++          <button className="back-link" onClick={backToList}><ArrowLeft size={16} /> Archivo de sagas</button>
++          {summary && (
++            <h1 className="sg-title vt-title" style={{ '--vt-name': transitionName(id) } as CSSProperties}>{summary.title}</h1>
++          )}
++          {state.status === 'loading' && <LoadingState text="Descifrando el Poneglyph…" />}
++          {state.status === 'error' && (
++            isLogPoseRequired(state.error) ? <LogPoseRequired />
++              : state.error instanceof ApiError && state.error.status === 404
++                ? <NotFoundState title="Saga no encontrada" detail="Esta saga no existe en tu workspace." backTo="/sagas" backLabel="Ver sagas" />
++                : <ErrorState error={state.error} onRetry={retry} />
++          )}
++        </div>
++      )}
++      {state.status === 'success' && state.data.stages.length > 0 && <Story story={state.data} onBack={backToList} />}
++      {state.status === 'success' && state.data.stages.length === 0 && (
++        <div className="page-content"><NotFoundState title="Saga sin etapas" detail="Esta saga todavía no tiene historia." backTo="/sagas" backLabel="Ver sagas" /></div>
++      )}
++    </div>
++  )
++}
++
++function Story({ story, onBack }: { story: SagaStoryData; onBack: () => void }) {
++  const { saga, map, stages } = story
++  const [searchParams, setSearchParams] = useSearchParams()
++  const urlStage = searchParams.get('stage')
++
++  // La URL indica la etapa activa (?stage=<slug>). Un slug inválido cae en la primera etapa.
++  const indexOfSlug = useCallback((slug: string | null) => {
++    const i = stages.findIndex((s) => s.slug === slug)
++    return i >= 0 ? i : 0
++  }, [stages])
++
++  const [active, setActive] = useState(() => indexOfSlug(urlStage))
++  const [revealedUpTo, setRevealedUpTo] = useState(() => indexOfSlug(urlStage))
++  const activeRef = useRef(active)
++  activeRef.current = active
++  const sectionRefs = useRef<(HTMLElement | null)[]>([])
++  const progressRef = useRef<HTMLDivElement>(null)
++
++  const scrollToStage = useCallback((index: number, smooth: boolean, focus = true) => {
++    const section = sectionRefs.current[index]
++    if (!section) return
++    section.scrollIntoView({ block: 'start', behavior: smooth && !prefersReducedMotion() ? 'smooth' : 'auto' })
++    // El foco acompaña a la etapa (lectores de pantalla y Tab siguen desde ahí).
++    if (focus) section.focus({ preventScroll: true })
++  }, [])
++
++  // Abrir una URL con ?stage=... lleva directo a esa etapa.
++  useLayoutEffect(() => {
++    const initial = indexOfSlug(urlStage)
++    if (initial > 0) scrollToStage(initial, false, false)
++    else window.scrollTo(0, 0)
++    // solo al montar la historia
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [])
++
++  // Mantener la URL sincronizada con la etapa activa (replace: no llena el historial).
++  useEffect(() => {
++    const slug = stages[active]?.slug
++    if (slug && searchParams.get('stage') !== slug) {
++      const next = new URLSearchParams(searchParams)
++      next.set('stage', slug)
++      setSearchParams(next, { replace: true })
++    }
++  }, [active, stages, searchParams, setSearchParams])
++
++  // Etapa activa según el scroll (+ progreso de respaldo cuando no hay Scroll-driven Animations).
++  useEffect(() => {
++    let frame = 0
++    const measure = () => {
++      const line = window.innerHeight * anchorRatio()
++      const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4
++      let current = 0
++      let revealed = 0
++      sectionRefs.current.forEach((section, i) => {
++        if (!section) return
++        const top = section.getBoundingClientRect().top
++        if (top <= line) current = i
++        if (top <= window.innerHeight * 0.9) revealed = i
++      })
++      if (atBottom) current = stages.length - 1
++      setActive(current)
++      setRevealedUpTo((prev) => Math.max(prev, revealed))
++      // Respaldo: sin soporte de Scroll-driven Animations (o con reduced motion) la barra se actualiza desde JS.
++      if ((!supportsScrollTimeline || prefersReducedMotion()) && progressRef.current) {
++        const max = document.documentElement.scrollHeight - window.innerHeight
++        const fraction = max > 0 ? Math.min(1, Math.max(0, window.scrollY / max)) : 1
++        progressRef.current.style.setProperty('--scroll-progress', String(fraction))
++      }
++    }
++    const onScroll = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure) }
++    window.addEventListener('scroll', onScroll, { passive: true })
++    window.addEventListener('resize', onScroll)
++    // Primera medición después de que el salto inicial se haya aplicado.
++    frame = requestAnimationFrame(measure)
++    return () => {
++      cancelAnimationFrame(frame)
++      window.removeEventListener('scroll', onScroll)
++      window.removeEventListener('resize', onScroll)
++    }
++  }, [stages.length])
++
++  const goTo = useCallback((index: number) => {
++    const safe = Math.min(stages.length - 1, Math.max(0, index))
++    scrollToStage(safe, true)
++  }, [stages.length, scrollToStage])
++
++  // Teclado: → / j siguiente etapa, ← / k anterior. Las flechas ↑↓ y Tab siguen funcionando normal.
++  useEffect(() => {
++    const onKey = (event: KeyboardEvent) => {
++      if (event.altKey || event.ctrlKey || event.metaKey) return
++      const target = event.target as HTMLElement | null
++      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return
++      if (event.key === 'ArrowRight' || event.key === 'j') { event.preventDefault(); goTo(activeRef.current + 1) }
++      if (event.key === 'ArrowLeft' || event.key === 'k') { event.preventDefault(); goTo(activeRef.current - 1) }
++    }
++    window.addEventListener('keydown', onKey)
++    return () => window.removeEventListener('keydown', onKey)
++  }, [goTo])
++
++  const stage = stages[active]
++  const palette = stage.palette
++  const themeStyle = {
++    '--sg-bg': palette.background,
++    '--sg-surface': palette.surface,
++    '--sg-primary': palette.primary,
++    '--sg-accent': palette.accent,
++    '--sg-text': palette.text,
++  } as CSSProperties
++
++  return (
++    <div className="sg-root" style={themeStyle}>
++      <div className="sg-progress" ref={progressRef} role="progressbar" aria-label="Progreso del recorrido" aria-valuemin={1} aria-valuemax={stages.length} aria-valuenow={active + 1} aria-valuetext={`Etapa ${active + 1} de ${stages.length}`}>
++        <div className="sg-progress-fill" />
++      </div>
++
++      <header className="sg-header">
++        <button className="sg-back" onClick={onBack}><ArrowLeft size={16} /> Archivo de sagas</button>
++        <span className="sg-kicker">SAGA {String(saga.order).padStart(2, '0')} · {saga.firstIsland} → {saga.lastIsland}</span>
++        <h1 className="sg-title vt-title" style={{ '--vt-name': transitionName(saga.id) } as CSSProperties}>{saga.title}</h1>
++        <p className="sg-subtitle">{saga.subtitle}</p>
++        <p className="sg-intro">{saga.intro}</p>
++        <p className="sg-hint">Desplázate para navegar · <kbd>←</kbd> <kbd>→</kbd> o <kbd>j</kbd> <kbd>k</kbd> para cambiar de etapa · <kbd>Tab</kbd> recorre las etapas</p>
++      </header>
++
++      <div className="sg-body">
++        <aside className="sg-panel" aria-label="Mapa y métricas de la etapa activa">
++          <RouteMap stages={stages} active={active} width={map.width} height={map.height} />
++          <div className="sg-panel-row">
++            <span className="sg-step">Etapa <b>{active + 1}</b> de {stages.length} · {Math.round(((active + 1) / stages.length) * 100)}% del recorrido</span>
++            <div className="sg-step-buttons">
++              <button onClick={() => goTo(active - 1)} disabled={active === 0} aria-label="Etapa anterior"><ArrowLeft size={15} /></button>
++              <button onClick={() => goTo(active + 1)} disabled={active === stages.length - 1} aria-label="Etapa siguiente"><ArrowRight size={15} /></button>
++            </div>
++          </div>
++          {/* Las métricas salen SIEMPRE de la etapa activa: no hay otro estado que pueda desincronizarse. */}
++          <dl className="sg-metrics" aria-live="polite">
++            {stage.metrics.map((metric) => (
++              <div key={metric.key} className="sg-metric">
++                <dt>{metric.label}</dt>
++                <dd>{metric.value.toLocaleString('es-PE')} <small>{metric.unit}</small></dd>
++              </div>
++            ))}
++          </dl>
++          <ol className="sg-stage-nav">
++            {stages.map((s, i) => (
++              <li key={s.id}>
++                <button onClick={() => goTo(i)} aria-current={i === active ? 'step' : undefined} className={i < active ? 'is-visited' : ''}>
++                  <span>{String(s.order).padStart(2, '0')}</span>{s.title}
++                </button>
++              </li>
++            ))}
++          </ol>
++        </aside>
++
++        <ol className="sg-stages">
++          {stages.map((s, i) => (
++            <li key={s.id}>
++              <section
++                ref={(node) => { sectionRefs.current[i] = node }}
++                id={`etapa-${s.slug}`}
++                tabIndex={0}
++                aria-labelledby={`etapa-${s.slug}-title`}
++                className={`sg-stage ${i === active ? 'is-active' : ''} ${i <= revealedUpTo ? 'is-revealed' : ''}`}
++                style={{ '--stage-accent': s.palette.accent, '--stage-primary': s.palette.primary } as CSSProperties}
++              >
++                <div className="sg-stage-inner">
++                  <span className="sg-stage-order">ETAPA {String(s.order).padStart(2, '0')} · {s.island.name}</span>
++                  <h2 id={`etapa-${s.slug}-title`}>{s.title}</h2>
++                  {s.narrative.map((paragraph, p) => <p key={p}>{paragraph}</p>)}
++                </div>
++              </section>
++            </li>
++          ))}
++        </ol>
++      </div>
++
++      <footer className="sg-end">
++        <Compass size={26} />
++        <h2>Fin del registro</h2>
++        <p>Recorriste {saga.totalDistanceNm.toLocaleString('es-PE')} millas náuticas en {stages.length} etapas.</p>
++        <button className="primary-btn" onClick={onBack}>Volver al archivo <ArrowRight size={16} /></button>
++      </footer>
++    </div>
++  )
++}
++
++// Mapa persistente: islas en sus coordenadas reales (viewBox = map.width × map.height),
++// la ruta completa tenue y la ruta recorrida que se dibuja hasta la etapa activa.
++function RouteMap({ stages, active, width, height }: { stages: SagaStage[]; active: number; width: number; height: number }) {
++  const points = useMemo(() => stages.map((s) => ({ x: s.island.x, y: s.island.y })), [stages])
++  const cumulative = useMemo(() => {
++    const out = [0]
++    for (let i = 1; i < points.length; i++) {
++      out.push(out[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y))
++    }
++    return out
++  }, [points])
++  const total = cumulative[cumulative.length - 1] || 1
++  const traveled = cumulative[active] ?? 0
++  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x} ${p.y}`).join(' ')
++  const ship = points[active]
++  const unit = Math.max(width, height) / 100
++
++  return (
++    <svg className="sg-map" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Mapa del Grand Line. Barco en ${stages[active].island.name}, etapa ${active + 1} de ${stages.length}.`}>
++      <defs>
++        <pattern id="sg-grid" width={width / 10} height={height / 5} patternUnits="userSpaceOnUse">
++          <path d={`M ${width / 10} 0 L 0 0 0 ${height / 5}`} fill="none" className="sg-map-grid" />
++        </pattern>
++      </defs>
++      <rect width={width} height={height} className="sg-map-sea" />
++      <rect width={width} height={height} fill="url(#sg-grid)" />
++      <path d={pathD} className="sg-route-base" strokeWidth={unit * 0.5} />
++      <path
++        d={pathD}
++        className="sg-route-traveled"
++        strokeWidth={unit * 0.8}
++        style={{ strokeDasharray: total, strokeDashoffset: total - traveled }}
++      />
++      {stages.map((s, i) => (
++        <g key={s.id} className={`sg-island ${i === active ? 'is-active' : i < active ? 'is-visited' : ''}`}>
++          <circle cx={s.island.x} cy={s.island.y} r={unit * (i === active ? 2.4 : 1.6)} />
++          <text x={s.island.x} y={s.island.y + unit * 5} textAnchor="middle" fontSize={unit * 2.6}>{s.island.name}</text>
++        </g>
++      ))}
++      <g className="sg-ship" style={{ transform: `translate(${ship.x}px, ${ship.y - unit * 4.5}px)` }}>
++        <Ship x={-unit * 2.5} y={-unit * 2.5} width={unit * 5} height={unit * 5} />
++      </g>
++    </svg>
++  )
++}
+diff --git a/src/pages/sagas/SagasPage.tsx b/src/pages/sagas/SagasPage.tsx
+new file mode 100644
+index 0000000..1971839
+--- /dev/null
++++ b/src/pages/sagas/SagasPage.tsx
+@@ -0,0 +1,65 @@
++import { useEffect, type CSSProperties, type MouseEvent } from 'react'
++import { Link, useNavigate } from 'react-router-dom'
++import { ArrowRight, BookOpen, MapPin } from 'lucide-react'
++import type { SagaSummary } from '../../api/types'
++import { EmptyState, ErrorState, isLogPoseRequired, LogPoseRequired, PageHeading } from '../../components/ui'
++import { useResource } from '../../lib/useResource'
++import { withViewTransition } from '../../lib/viewTransition'
++import { rememberSagas, transitionName } from './sagaCache'
++
++export function SagasPage() {
++  const { state, retry } = useResource<SagaSummary[]>('/sagas')
++  const navigate = useNavigate()
++
++  useEffect(() => {
++    if (state.status === 'success') rememberSagas(state.data)
++  }, [state])
++
++  function open(event: MouseEvent<HTMLAnchorElement>, id: string) {
++    // Clic normal: navegación con View Transition (si existe). Ctrl/Cmd+clic: comportamiento del navegador.
++    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
++    event.preventDefault()
++    withViewTransition(() => navigate(`/sagas/${encodeURIComponent(id)}`))
++  }
++
++  return (
++    <div className="page-content">
++      <PageHeading
++        eyebrow="GRAND LINE · PONEGLYPH"
++        title="La historia"
++        highlight="que el mundo olvidó."
++        description="Cada saga se recorre isla por isla. Elige una para comenzar el viaje."
++      />
++      {state.status === 'loading' && (
++        <div className="saga-list" aria-busy="true">{[0, 1, 2].map((i) => <div key={i} className="saga-tile skeleton-block" style={{ height: 230 }} />)}</div>
++      )}
++      {state.status === 'error' && (isLogPoseRequired(state.error) ? <LogPoseRequired /> : <ErrorState error={state.error} onRetry={retry} />)}
++      {state.status === 'success' && (state.data.length === 0 ? (
++        <EmptyState title="No hay sagas registradas" detail="El archivo de Poneglyphs está vacío." />
++      ) : (
++        <div className="saga-list">
++          {state.data.map((saga) => (
++            <Link
++              key={saga.id}
++              to={`/sagas/${encodeURIComponent(saga.id)}`}
++              onClick={(e) => open(e, saga.id)}
++              className="saga-tile"
++              style={{ '--saga-bg': saga.palette.background, '--saga-surface': saga.palette.surface, '--saga-primary': saga.palette.primary, '--saga-accent': saga.palette.accent, '--saga-text': saga.palette.text } as CSSProperties}
++            >
++              <span className="saga-tile-order">SAGA {String(saga.order).padStart(2, '0')}</span>
++              <h2 className="vt-title" style={{ '--vt-name': transitionName(saga.id) } as CSSProperties}>{saga.title}</h2>
++              <p className="saga-tile-subtitle">{saga.subtitle}</p>
++              <p className="saga-tile-synopsis">{saga.synopsis}</p>
++              <div className="saga-tile-meta">
++                <span><BookOpen size={14} /> {saga.stageCount} etapas</span>
++                <span><MapPin size={14} /> {saga.firstIsland} → {saga.lastIsland}</span>
++                <span>{saga.totalDistanceNm.toLocaleString('es-PE')} mn</span>
++              </div>
++              <span className="saga-tile-cta">Iniciar viaje <ArrowRight size={14} /></span>
++            </Link>
++          ))}
++        </div>
++      ))}
++    </div>
++  )
++}
+diff --git a/src/pages/sagas/sagaCache.ts b/src/pages/sagas/sagaCache.ts
+new file mode 100644
+index 0000000..a13304a
+--- /dev/null
++++ b/src/pages/sagas/sagaCache.ts
+@@ -0,0 +1,17 @@
++import type { SagaSummary } from '../../api/types'
++
++// Resúmenes ya recibidos de /sagas: la historia puede mostrar el título al instante
++// (y animarlo con View Transitions) mientras carga /sagas/{id}/story.
++const summaries = new Map<string, SagaSummary>()
++
++export function rememberSagas(list: SagaSummary[]): void {
++  for (const saga of list) summaries.set(saga.id, saga)
++}
++
++export function getSagaSummary(id: string): SagaSummary | undefined {
++  return summaries.get(id)
++}
++
++export function transitionName(id: string): string {
++  return `saga-${id.replace(/[^a-zA-Z0-9_-]/g, '')}`
++}
+diff --git a/src/pages/wanted/WantedDetail.tsx b/src/pages/wanted/WantedDetail.tsx
+new file mode 100644
+index 0000000..3a76292
+--- /dev/null
++++ b/src/pages/wanted/WantedDetail.tsx
+@@ -0,0 +1,86 @@
++import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
++import { ArrowLeft, Skull } from 'lucide-react'
++import { ApiError } from '../../api/client'
++import type { WantedDetail as WantedDetailData } from '../../api/types'
++import { ErrorState, LoadingState, NotFoundState, PageHeading } from '../../components/ui'
++import { berries, dateTime, FRUIT_LABEL, ROLE_LABEL, WANTED_STATUS_LABEL } from '../../lib/format'
++import { useResource } from '../../lib/useResource'
++
++export function WantedDetail() {
++  const { id = '' } = useParams()
++  const navigate = useNavigate()
++  const location = useLocation()
++  const { state, retry } = useResource<WantedDetailData>(`/wanted/${encodeURIComponent(id)}`)
++
++  // Si venimos del listado, "volver" regresa a esa misma entrada del historial:
++  // la URL del listado (filtros, página, orden) es idéntica, así que se ve exactamente igual.
++  const cameFromList = Boolean((location.state as { fromList?: boolean } | null)?.fromList)
++  function goBack() {
++    if (cameFromList) navigate(-1)
++    else navigate('/wanted')
++  }
++
++  return (
++    <div className="page-content detail-page">
++      <button className="back-link" onClick={goBack}><ArrowLeft size={16} /> Volver al archivo</button>
++
++      {state.status === 'loading' && <LoadingState text="Abriendo el expediente…" />}
++      {state.status === 'error' && (state.error instanceof ApiError && state.error.status === 404
++        ? <NotFoundState title="Cartel no encontrado" detail="Este cartel no existe en el workspace de tu tripulación." backTo="/wanted" backLabel="Ir al archivo" />
++        : <ErrorState error={state.error} onRetry={retry} />)}
++
++      {state.status === 'success' && (() => {
++        const w = state.data
++        const history = w.bountyHistory
++        const maxAmount = Math.max(1, ...history.map((h) => h.amount))
++        return (
++          <>
++            <PageHeading eyebrow="ARCHIVO · FICHA DE OBJETIVO" title={w.name} highlight={`“${w.epithet}”`} description={w.bio} />
++            <div className="wanted-detail-layout">
++              <div className="wanted-detail-poster">
++                <div className="wanted-card">
++                  <div className="wanted-card-art">
++                    <div className="wanted-placeholder"><Skull size={64} strokeWidth={1} /><span>WANTED</span></div>
++                    <span className={`wanted-status ${w.status === 'AT_LARGE' ? 'status-active' : ''}`}>{WANTED_STATUS_LABEL[w.status]}</span>
++                  </div>
++                  <div className="wanted-card-info">
++                    <div className="bounty-label">RECOMPENSA ACTUAL</div>
++                    <div className="bounty-amount">{berries(w.bounty)}</div>
++                  </div>
++                </div>
++              </div>
++              <div className="detail-info-panel">
++                <div className="section-kicker"><span className="kicker-line" /> DATOS DEL OBJETIVO</div>
++                <dl className="detail-list">
++                  {([
++                    ['Tripulación', <Link key="crew" to={`/wanted?crewId=${encodeURIComponent(w.crew.id)}`}>{w.crew.name}</Link>],
++                    ['Puesto', ROLE_LABEL[w.role]],
++                    ['Fruta del diablo', w.devilFruit ? `${w.devilFruit.name} (${FRUIT_LABEL[w.devilFruit.type]})` : 'Ninguna'],
++                    ['Nivel de amenaza', `${w.threatLevel} / 5`],
++                    ['Edad', `${w.age} años`],
++                    ['Estatura', `${w.heightCm} cm`],
++                    ['Visto por última vez', `${w.lastSeen.island} · ${dateTime(w.lastSeen.seenAt)}`],
++                    ['Última actualización', dateTime(w.updatedAt)],
++                  ] as const).map(([label, value]) => (
++                    <div className="detail-row" key={label}><dt>{label}</dt><dd>{value}</dd></div>
++                  ))}
++                </dl>
++
++                <div className="section-kicker" style={{ marginTop: 24 }}><span className="kicker-line" /> HISTORIAL DE RECOMPENSAS</div>
++                <ol className="bounty-history">
++                  {history.map((h, i) => (
++                    <li key={`${h.issuedAt}-${i}`}>
++                      <span>{dateTime(h.issuedAt)}</span>
++                      <span className="bounty-bar"><span style={{ width: `${(h.amount / maxAmount) * 100}%` }} /></span>
++                      <b>{berries(h.amount)}</b>
++                    </li>
++                  ))}
++                </ol>
++              </div>
++            </div>
++          </>
++        )
++      })()}
++    </div>
++  )
++}
+diff --git a/src/pages/wanted/WantedList.tsx b/src/pages/wanted/WantedList.tsx
+new file mode 100644
+index 0000000..3bb6b88
+--- /dev/null
++++ b/src/pages/wanted/WantedList.tsx
+@@ -0,0 +1,245 @@
++import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
++import { Link, useSearchParams } from 'react-router-dom'
++import { ArrowLeft, ArrowRight, Filter, Search, Skull, Target, X } from 'lucide-react'
++import { api } from '../../api/client'
++import type { Crew, FruitFilter, PageSize, WantedPage, WantedSort, WantedStatus, WantedSummary } from '../../api/types'
++import { FRUIT_FILTERS, PAGE_SIZES, pickEnum, WANTED_SORTS, WANTED_STATUSES } from '../../api/types'
++import { EmptyState, ErrorState, PageHeading } from '../../components/ui'
++import { berries, FRUIT_LABEL, WANTED_STATUS_LABEL } from '../../lib/format'
++import { useResource } from '../../lib/useResource'
++import { DEFAULT_SIZE, DEFAULT_SORT, getCachedPage, parseWantedQuery, setCachedPage, toApiParams, toUrlParams, type WantedQuery } from './wantedQuery'
++
++const SORT_LABEL: Record<WantedSort, string> = {
++  'bounty,desc': 'Mayor recompensa',
++  'name,asc': 'Nombre A–Z',
++  'updatedAt,desc': 'Actualizados recientemente',
++}
++const SEARCH_DEBOUNCE_MS = 400
++const SCROLL_KEY = 'wanted-list-scroll'
++
++export function WantedList() {
++  const [searchParams, setSearchParams] = useSearchParams()
++  const query = useMemo(() => parseWantedQuery(searchParams), [searchParams])
++  const urlKey = searchParams.toString()
++  const canonicalKey = toUrlParams(query).toString()
++  const apiKey = toApiParams(query)
++
++  // 1) URL inválida o no canónica → se corrige con replace (no ensucia el historial).
++  useEffect(() => {
++    if (urlKey !== canonicalKey) setSearchParams(new URLSearchParams(canonicalKey), { replace: true })
++  }, [urlKey, canonicalKey, setSearchParams])
++
++  // Cambia la URL: los filtros/búsqueda/orden/tamaño siempre vuelven a la página 0
++  // en la MISMA actualización, así nunca se pide una página que ya no existe.
++  function commit(patch: Partial<WantedQuery>, options: { keepPage?: boolean; replace?: boolean } = {}) {
++    const next: WantedQuery = { ...query, ...patch }
++    if (!options.keepPage) next.page = 0
++    setSearchParams(toUrlParams(next), { replace: options.replace })
++  }
++
++  // 2) Búsqueda con debounce: el input es local y responde al instante;
++  //    la URL (y la request) solo se actualiza cuando el usuario deja de tipear.
++  const [input, setInput] = useState(query.q)
++  useEffect(() => {
++    // Atrás/adelante cambian la URL: el input se sincroniza (sin borrar espacios mientras se tipea).
++    setInput((prev) => (prev.trim() === query.q ? prev : query.q))
++  }, [query.q])
++  useEffect(() => {
++    if (input.trim() === query.q) return
++    const timer = window.setTimeout(() => commit({ q: input.trim().slice(0, 100) }), SEARCH_DEBOUNCE_MS)
++    return () => window.clearTimeout(timer) // cada tecla cancela el temporizador anterior
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [input, query])
++
++  // 3) Datos: se conserva la última respuesta mientras carga la siguiente (sin saltos de layout).
++  const [result, setResult] = useState<{ key: string; data: WantedPage } | null>(() => {
++    const cached = getCachedPage(apiKey)
++    return cached ? { key: apiKey, data: cached } : null
++  })
++  const [loading, setLoading] = useState(true)
++  const [error, setError] = useState<{ key: string; error: unknown } | null>(null)
++  const [attempt, setAttempt] = useState(0)
++
++  useEffect(() => {
++    const controller = new AbortController()
++    const requested = query
++    setLoading(true)
++    setError(null)
++    api<WantedPage>(`/wanted?${apiKey}`, { signal: controller.signal })
++      .then((page) => {
++        // Página fuera de rango (p. ej. ?page=40 con 3 páginas): se lleva al usuario a una que exista.
++        const lastPage = Math.max(0, page.totalPages - 1)
++        if (requested.page > lastPage) {
++          setSearchParams(toUrlParams({ ...requested, page: lastPage }), { replace: true })
++          return
++        }
++        setCachedPage(apiKey, page)
++        setResult({ key: apiKey, data: page })
++        setLoading(false)
++      })
++      .catch((err: unknown) => {
++        // Respuesta vieja (la URL ya cambió): se descarta. Solo se muestra lo último que pidió el usuario.
++        if (controller.signal.aborted) return
++        setError({ key: apiKey, error: err })
++        setLoading(false)
++      })
++    return () => controller.abort()
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [apiKey, attempt])
++
++  const crews = useResource<Crew[]>('/crews')
++  const crewList = crews.state.status === 'success' ? crews.state.data : []
++  const unknownCrew = Boolean(query.crewId) && crews.state.status === 'success' && !crewList.some((c) => c.id === query.crewId)
++
++  // 4) Al volver del detalle se restaura el scroll donde estaba el usuario.
++  const restoredRef = useRef(false)
++  useLayoutEffect(() => {
++    if (restoredRef.current || result?.key !== apiKey) return
++    restoredRef.current = true
++    try {
++      const saved = sessionStorage.getItem(SCROLL_KEY)
++      if (!saved) return
++      const { key, y } = JSON.parse(saved) as { key: string; y: number }
++      sessionStorage.removeItem(SCROLL_KEY)
++      if (key === canonicalKey) window.scrollTo(0, y)
++    } catch { /* sin sessionStorage: no se restaura */ }
++  }, [result, apiKey, canonicalKey])
++
++  function rememberScroll() {
++    try { sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ key: canonicalKey, y: window.scrollY })) } catch { /* ignorar */ }
++  }
++
++  const topRef = useRef<HTMLDivElement>(null)
++  function goToPage(page: number) {
++    commit({ page }, { keepPage: true })
++    topRef.current?.scrollIntoView({ block: 'start' })
++  }
++
++  const data = result?.data ?? null
++  const isCurrent = result?.key === apiKey
++  const currentError = error?.key === apiKey ? error.error : null
++  const totalPages = data?.totalPages ?? 0
++  const hasFilters = Boolean(query.q || query.status || query.crewId || query.fruit)
++
++  return (
++    <div className="page-content">
++      <PageHeading
++        eyebrow="EAST BLUE · ARCHIVO DE RECOMPENSAS"
++        title="Se busca,"
++        highlight="vivo o muerto."
++        description="Filtra, busca y ordena los carteles de tu workspace. Todo el estado vive en la URL."
++        action={<span className="count-pill"><Target size={15} />{data ? `${data.totalElements.toLocaleString('es-PE')} carteles` : '— carteles'}</span>}
++      />
++
++      <div ref={topRef} />
++      <section className="filter-panel" aria-label="Filtros">
++        <div className="filter-panel-heading">
++          <div><Filter size={16} /><b>FILTRAR ARCHIVO</b></div>
++          <button className="text-button" disabled={!hasFilters && input === ''} onClick={() => { setInput(''); setSearchParams(new URLSearchParams()) }}>
++            Limpiar filtros <X size={13} />
++          </button>
++        </div>
++        <div className="filters-grid">
++          <label className="search-field">
++            <Search size={17} />
++            <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Buscar por nombre o epíteto…" aria-label="Buscar por nombre o epíteto" maxLength={100} />
++          </label>
++          <label>
++            <span>Estado</span>
++            <select value={query.status ?? ''} onChange={(e) => commit({ status: pickEnum<WantedStatus>(WANTED_STATUSES, e.target.value) })}>
++              <option value="">Todos los estados</option>
++              {WANTED_STATUSES.map((s) => <option key={s} value={s}>{WANTED_STATUS_LABEL[s]}</option>)}
++            </select>
++          </label>
++          <label>
++            <span>Tripulación</span>
++            <select value={query.crewId ?? ''} onChange={(e) => commit({ crewId: e.target.value || undefined })} disabled={crews.state.status === 'loading'}>
++              <option value="">{crews.state.status === 'loading' ? 'Cargando tripulaciones…' : 'Todas las tripulaciones'}</option>
++              {unknownCrew && <option value={query.crewId}>Tripulación desconocida</option>}
++              {crewList.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
++            </select>
++            {crews.state.status === 'error' && <button className="inline-retry" onClick={crews.retry}>No se cargaron las tripulaciones · Reintentar</button>}
++          </label>
++          <label>
++            <span>Fruta del diablo</span>
++            <select value={query.fruit ?? ''} onChange={(e) => commit({ fruit: pickEnum<FruitFilter>(FRUIT_FILTERS, e.target.value) })}>
++              <option value="">Todas</option>
++              {FRUIT_FILTERS.map((f) => <option key={f} value={f}>{FRUIT_LABEL[f]}</option>)}
++            </select>
++          </label>
++        </div>
++        <div className="filter-footer">
++          <span aria-live="polite">
++            {loading ? 'Actualizando archivo…' : data && data.totalElements > 0
++              ? `Mostrando ${query.page * query.size + 1}–${query.page * query.size + data.content.length} de ${data.totalElements}`
++              : 'Sin resultados'}
++          </span>
++          <label className="sort-control">ORDENAR POR
++            <select value={query.sort} onChange={(e) => commit({ sort: pickEnum(WANTED_SORTS, e.target.value) ?? DEFAULT_SORT })}>
++              {WANTED_SORTS.map((s) => <option key={s} value={s}>{SORT_LABEL[s]}</option>)}
++            </select>
++          </label>
++        </div>
++      </section>
++
++      {/* Contenedor de altura estable: loading, error y vacío se dibujan aquí dentro. */}
++      <div className="results-area" aria-busy={loading}>
++        {currentError !== null ? (
++          <ErrorState error={currentError} onRetry={() => setAttempt((n) => n + 1)} />
++        ) : !data ? (
++          <div className="wanted-grid">{Array.from({ length: 6 }, (_, i) => <div key={i} className="wanted-card skeleton-card" />)}</div>
++        ) : isCurrent && data.content.length === 0 ? (
++          <EmptyState
++            title="No hay objetivos en el radar"
++            detail={hasFilters ? 'Ningún cartel cumple estos filtros. Prueba con otra búsqueda o limpia los filtros.' : 'Tu workspace no tiene carteles.'}
++            action={hasFilters ? <button className="secondary-btn" onClick={() => { setInput(''); setSearchParams(new URLSearchParams()) }}>Limpiar filtros</button> : undefined}
++          />
++        ) : (
++          <div className={`wanted-grid ${loading && !isCurrent ? 'is-refreshing' : ''}`}>
++            {data.content.map((item) => <WantedCard key={item.id} item={item} onOpen={rememberScroll} />)}
++          </div>
++        )}
++        {loading && !isCurrent && data && currentError === null && <div className="refresh-indicator"><span className="spinner dark-spinner" /> Actualizando…</div>}
++      </div>
++
++      <div className="pagination">
++        <span>PÁGINA <b>{totalPages === 0 ? 0 : query.page + 1}</b> DE <b>{totalPages}</b></span>
++        <div>
++          <button className="page-arrow" disabled={query.page <= 0 || loading} onClick={() => goToPage(query.page - 1)} aria-label="Página anterior"><ArrowLeft size={16} /></button>
++          <button className="page-arrow" disabled={query.page + 1 >= totalPages || loading} onClick={() => goToPage(query.page + 1)} aria-label="Página siguiente"><ArrowRight size={16} /></button>
++        </div>
++        <label className="page-size">POR PÁGINA
++          <select value={query.size} onChange={(e) => commit({ size: pickEnum<PageSize>(PAGE_SIZES, Number(e.target.value)) ?? DEFAULT_SIZE })}>
++            {PAGE_SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
++          </select>
++        </label>
++      </div>
++    </div>
++  )
++}
++
++function ThreatLevel({ level }: { level: number }) {
++  return <span className="threat" aria-label={`Amenaza ${level} de 5`}>{'●'.repeat(level)}<span className="threat-off">{'●'.repeat(Math.max(0, 5 - level))}</span></span>
++}
++
++function WantedCard({ item, onOpen }: { item: WantedSummary; onOpen: () => void }) {
++  return (
++    <Link className="wanted-card" to={`/wanted/${encodeURIComponent(item.id)}`} state={{ fromList: true }} onClick={onOpen}>
++      <div className="wanted-card-art">
++        <div className="wanted-placeholder"><Skull size={54} strokeWidth={1} /><span>WANTED</span></div>
++        <span className={`wanted-status ${item.status === 'AT_LARGE' ? 'status-active' : ''}`}>{WANTED_STATUS_LABEL[item.status]}</span>
++        <span className="wanted-card-index"><ThreatLevel level={item.threatLevel} /></span>
++      </div>
++      <div className="wanted-card-info">
++        <div className="wanted-epithet">“{item.epithet}”</div>
++        <h3>{item.name}</h3>
++        <div className="bounty-label">RECOMPENSA</div>
++        <div className="bounty-amount">{berries(item.bounty)}</div>
++        <div className="wanted-card-meta">
++          <span>{item.crew.name} · {item.devilFruit ? FRUIT_LABEL[item.devilFruit.type] : 'Sin fruta'}</span>
++          <ArrowRight size={15} />
++        </div>
++      </div>
++    </Link>
++  )
++}
+diff --git a/src/pages/wanted/wantedQuery.ts b/src/pages/wanted/wantedQuery.ts
+new file mode 100644
+index 0000000..a805028
+--- /dev/null
++++ b/src/pages/wanted/wantedQuery.ts
+@@ -0,0 +1,70 @@
++import { FRUIT_FILTERS, PAGE_SIZES, pickEnum, WANTED_SORTS, WANTED_STATUSES } from '../../api/types'
++import type { FruitFilter, PageSize, WantedPage, WantedSort, WantedStatus } from '../../api/types'
++
++// Estado completo del listado. Vive en la URL (fuente única de verdad).
++export interface WantedQuery {
++  page: number
++  size: PageSize
++  sort: WantedSort
++  status?: WantedStatus
++  crewId?: string
++  fruit?: FruitFilter
++  q: string
++}
++
++export const DEFAULT_SIZE: PageSize = 20
++export const DEFAULT_SORT: WantedSort = 'bounty,desc'
++
++// Lee la URL y valida cada valor: lo que no cumple el contrato se reemplaza por el valor por defecto,
++// así una URL inválida (?page=-3&size=999&status=X) nunca rompe la vista ni llega al backend.
++export function parseWantedQuery(params: URLSearchParams): WantedQuery {
++  const pageRaw = params.get('page')
++  const page = pageRaw !== null && /^\d{1,6}$/.test(pageRaw) ? Number(pageRaw) : 0
++  const crewRaw = (params.get('crewId') ?? '').trim()
++  const qRaw = (params.get('q') ?? '').trim().slice(0, 100)
++  return {
++    page,
++    size: pickEnum(PAGE_SIZES, params.get('size')) ?? DEFAULT_SIZE,
++    sort: pickEnum(WANTED_SORTS, params.get('sort')) ?? DEFAULT_SORT,
++    status: pickEnum(WANTED_STATUSES, params.get('status')),
++    fruit: pickEnum(FRUIT_FILTERS, params.get('fruit')),
++    crewId: crewRaw && crewRaw.length <= 200 ? crewRaw : undefined,
++    q: qRaw,
++  }
++}
++
++// Forma canónica para la URL: solo lo que difiere del valor por defecto, siempre en el mismo orden.
++export function toUrlParams(query: WantedQuery): URLSearchParams {
++  const p = new URLSearchParams()
++  if (query.q) p.set('q', query.q)
++  if (query.status) p.set('status', query.status)
++  if (query.crewId) p.set('crewId', query.crewId)
++  if (query.fruit) p.set('fruit', query.fruit)
++  if (query.sort !== DEFAULT_SORT) p.set('sort', query.sort)
++  if (query.size !== DEFAULT_SIZE) p.set('size', String(query.size))
++  if (query.page > 0) p.set('page', String(query.page))
++  return p
++}
++
++// Parámetros completos para la API (siempre explícitos).
++export function toApiParams(query: WantedQuery): string {
++  const p = new URLSearchParams({ page: String(query.page), size: String(query.size), sort: query.sort })
++  if (query.status) p.set('status', query.status)
++  if (query.crewId) p.set('crewId', query.crewId)
++  if (query.fruit) p.set('fruit', query.fruit)
++  if (query.q) p.set('q', query.q)
++  return p.toString()
++}
++
++// Caché en memoria de las últimas páginas vistas: al volver del detalle el listado aparece
++// al instante, idéntico a como se dejó (y se revalida en segundo plano).
++const pageCache = new Map<string, WantedPage>()
++export function getCachedPage(key: string): WantedPage | undefined { return pageCache.get(key) }
++export function setCachedPage(key: string, page: WantedPage): void {
++  pageCache.delete(key)
++  pageCache.set(key, page)
++  if (pageCache.size > 30) {
++    const oldest = pageCache.keys().next().value
++    if (oldest !== undefined) pageCache.delete(oldest)
++  }
++}
+diff --git a/styles.css b/src/styles.css
+similarity index 100%
+rename from styles.css
+rename to src/styles.css
+diff --git a/src/vite-env.d.ts b/src/vite-env.d.ts
+new file mode 100644
+index 0000000..8ab4f00
+--- /dev/null
++++ b/src/vite-env.d.ts
+@@ -0,0 +1,9 @@
++/// <reference types="vite/client" />
++
++interface ImportMetaEnv {
++  readonly VITE_API_BASE_URL: string
++}
++
++interface ImportMeta {
++  readonly env: ImportMetaEnv
++}
+-- 
+2.43.0
+

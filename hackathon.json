@@ -1,8 +1,8 @@
 {
-  "teamCode": "REEMPLAZAR_CON_TEAM_CODE",
+  "teamCode": "TEAM-015",
   "members": [
-    { "name": "Nombre del integrante 1", "code": "Código UTEC" },
-    { "name": "Nombre del integrante 2", "code": "Código UTEC" },
-    { "name": "Nombre del integrante 3", "code": "Código UTEC" }
+    { "name": "Joseph Geraldo Soto", "code": "202510412" },
+    { "name": "Hideki Aldo Kunigami Chia", "code": "202510390" },
+    { "name": "Martin Talavera Pinto", "code": "202510730" }
   ]
 }
